@@ -1,0 +1,32 @@
+model:
+  device: "mps"
+  lr: 1e-4
+  batch_size: 32
+  grad_clip: 10.0
+
+  seeds:
+    - 0
+    - 1
+    - 2
+    - 3
+
+federation:
+  num_communication_rounds: 500
+  local_epochs_per_round: 4
+  n_clients: 5
+  n_arms: 3
+  cvar_alpha: 0.1
+  client_weights: 
+    - 0.5
+    - 0.15
+    - 0.15
+    - 0.1
+    - 0.1
+
+# fedrl specific
+fedrl:
+  kappa: 0.05
+  server_kd_lr: 1e-2
+  ot_reg: 1e-1
+  ot_p: 1
+  server_kd_steps: 100
