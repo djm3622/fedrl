@@ -2,8 +2,11 @@
 
 Sweden project.
 
+## TODO
+1. Abalation study to figure out why our method works better in 1.1, when doesn't it work?
+
 ## Case Study 1.1
-This case study looks at a federated DRL bandit problem.
+This case study looks at a federated DRL bandit problem. *Our method converges faster* 
 
 ### Requirements
 Necessary python packages can be installed using **pip**:
