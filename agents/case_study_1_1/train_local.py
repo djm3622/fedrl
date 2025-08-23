@@ -4,6 +4,7 @@ from configs.config_templates.case_study_1_1 import Config
 import numpy as np
 
 import torch
+from torch import nn
 import torch.nn.functional as F
 from torch.optim import AdamW
 
@@ -30,18 +31,19 @@ def train_local(env: HeteroBandit, cfg: Config, summary: Dict):
             optimizer = client_optimizers[client_id]
             model.train() 
 
-            local_epochs_i = max(1, int(np.ceil(cfg.local_epochs_per_round * (w[client_id] * cfg.n_clients))))
+            batch_size = max(1, int(np.ceil(cfg.batch_size * (w[client_id] * cfg.n_clients))))
 
             client_losses = [] 
-            for local_epoch in range(local_epochs_i):
-                optimizer.zero_grad()
+            for local_epoch in range(cfg.local_epochs_per_round):
 
                 for arm_id in range(env.n_arms):
-                    rewards_tensor = torch.tensor(env.sample(client_id, arm_id, cfg.batch_size), dtype=torch.float32).to(cfg.device)
-                    arm_indices = torch.tensor([arm_id]).repeat(cfg.batch_size).to(cfg.device)
+                    optimizer.zero_grad()
+                    
+                    rewards_tensor = torch.tensor(env.sample(client_id, arm_id, batch_size), dtype=torch.float32).to(cfg.device)
+                    arm_indices = torch.tensor([arm_id]).repeat(batch_size).to(cfg.device)
 
                     # Forward pass
-                    predicted = model(torch.tensor([[arm_id]]).repeat(cfg.batch_size, 1).to(cfg.device))
+                    predicted = model(torch.tensor([[arm_id]]).repeat(batch_size, 1).to(cfg.device))
                     target_distribution = c51_project(rewards_tensor, z_c51)
 
                     # Calculate loss
@@ -50,6 +52,7 @@ def train_local(env: HeteroBandit, cfg: Config, summary: Dict):
 
                     # Backward pass and optimize
                     loss.backward()
+                    nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
                     optimizer.step()
 
                     round_losses.append(loss.item())
@@ -61,7 +64,7 @@ def train_local(env: HeteroBandit, cfg: Config, summary: Dict):
             truth_hist = []
             for arm_id in range(env.n_arms):
                 with torch.no_grad():
-                    p = model = client_models[client_id](
+                    p = client_models[client_id](
                         torch.tensor([arm_id]).to(cfg.device).unsqueeze(0)
                     )[0].cpu().numpy()
                 pred_hist.append(normalize_hist(p))

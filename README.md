@@ -3,10 +3,15 @@
 Sweden project.
 
 ## TODO
-1. Abalation study to figure out why our method works better in 1.1, when doesn't it work?
+1. After bug fixing the method is not better.
+2. Make improvements to benefit federation. Local dominates too much.
+3. Create data scarcity/imbalance
+4. Personalized teacher via LOO barycenters
+5. Trust-region KL with dual control
+6. 
 
 ## Case Study 1.1
-This case study looks at a federated DRL bandit problem. *Our method converges faster.* 
+This case study looks at a federated DRL bandit problem.
 
 ### Requirements
 Necessary python packages can be installed using **pip**:

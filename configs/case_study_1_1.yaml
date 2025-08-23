@@ -1,27 +1,24 @@
 model:
   device: "mps"
   lr: 1e-4
-  batch_size: 32
+  batch_size: 1
   grad_clip: 10.0
 
   seeds:
     - 0
-    - 1
-    - 2
-    - 3
 
 federation:
   num_communication_rounds: 500
-  local_epochs_per_round: 4
+  local_epochs_per_round: 2
   n_clients: 5
   n_arms: 3
   cvar_alpha: 0.1
   client_weights: 
-    - 0.5
-    - 0.15
-    - 0.15
-    - 0.1
-    - 0.1
+    - 0.8
+    - 0.05
+    - 0.05
+    - 0.05
+    - 0.05
 
 # fedrl specific
 fedrl:

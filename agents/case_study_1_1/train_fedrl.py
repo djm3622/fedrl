@@ -42,9 +42,9 @@ def train_fedrl(env: HeteroBandit, cfg: Config, summary: Dict):
 
             client_losses = [] 
             for local_epoch in range(cfg.local_epochs_per_round):
-                optimizer.zero_grad()
 
                 for arm_id in range(env.n_arms):
+                    optimizer.zero_grad()
                     rewards_tensor = torch.tensor(env.sample(client_id, arm_id, batch_size), dtype=torch.float32).to(cfg.device)
 
                     # Forward pass
