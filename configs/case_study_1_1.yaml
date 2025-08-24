@@ -6,6 +6,9 @@ model:
 
   seeds:
     - 0
+    - 1
+    - 2
+    - 3
 
 federation:
   num_communication_rounds: 500
@@ -23,7 +26,7 @@ federation:
 # fedrl specific
 fedrl:
   kappa: 0.05
-  server_kd_lr: 1e-2
+  server_kd_lr: 1e-1
   ot_reg: 1e-1
   ot_p: 1
-  server_kd_steps: 100
+  server_kd_steps: 10
