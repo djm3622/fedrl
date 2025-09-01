@@ -2,6 +2,7 @@ import os
 import random
 from typing import List, get_origin, get_args
 import yaml
+from pathlib import Path
 from configs.config_templates.case_study_1_1 import Config
 
 import numpy as np
@@ -135,3 +136,7 @@ def load_config(path: str) -> Config:
             else:
                 kwargs[f.name] = _cast_scalar(val, tgt)
     return Config(**kwargs)
+
+
+def _ensure_dir(p: Path) -> None:
+    p.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ from utils.general import normalize_weights, normalize_hist
 from eval.tabular import compute_metrics
 
 from federation.case_study_1_1.fedavg import FedAvgServer
+from eval.distributions import save_round_plots, compile_gifs
 
 
 def train_fedavg(env: HeteroBandit, cfg: Config, summary: Dict):
@@ -93,4 +94,22 @@ def train_fedavg(env: HeteroBandit, cfg: Config, summary: Dict):
         for k, v in avg_metrics.items():
             summary['fedavg']['metrics'][k].append(v)
         
+        save_round_plots(
+            algo="fedavg",
+            round_idx=round,
+            client_models=client_models,
+            env=env,
+            z=z_np, 
+            out_root=getattr(cfg, "plot_dir", "plots"),
+            truth_nsamp=20_000,
+        )
+        
+    compile_gifs(
+        algo="fedavg",             
+        out_root=getattr(cfg, "plot_dir", "plots"),
+        n_clients=env.n_clients,
+        n_arms=cfg.n_arms,
+        fps=6,
+    )
+
     return summary

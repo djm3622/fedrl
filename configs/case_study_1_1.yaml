@@ -11,7 +11,7 @@ model:
     - 3
 
 federation:
-  num_communication_rounds: 500
+  num_communication_rounds: 1000
   local_epochs_per_round: 2
   n_clients: 5
   n_arms: 3

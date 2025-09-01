@@ -15,6 +15,7 @@ from utils.general import normalize_weights, normalize_hist
 from eval.tabular import compute_metrics
 
 from federation.case_study_1_1.fedrl import FeDRLServer
+from eval.distributions import save_round_plots, compile_gifs
 
 
 def train_fedrl(env: HeteroBandit, cfg: Config, summary: Dict):
@@ -137,7 +138,7 @@ def train_fedrl(env: HeteroBandit, cfg: Config, summary: Dict):
         # ----- Server ops -----
         fedrl_server.aggregate(client_models)
         # Produces global teacher; if your server computes LOO, it will also populate last_loo_bary
-        _ = fedrl_server.distill(client_models)
+        p_bars, _ = fedrl_server.distill(client_models)
 
         # ----- Metrics -----
         all_metrics = []
@@ -165,5 +166,24 @@ def train_fedrl(env: HeteroBandit, cfg: Config, summary: Dict):
         if use_tr:
             summary['fedrl'].setdefault('lambda', []).append(lam.detach().cpu().numpy().copy())
             summary['fedrl'].setdefault('kl_ema', []).append(kl_ema.detach().cpu().numpy().copy())
+
+        save_round_plots(
+            algo="fedrl",
+            round_idx=round,
+            client_models=client_models,
+            env=env,
+            z=z_np,
+            out_root=getattr(cfg, "plot_dir", "plots"),
+            global_pbars=p_bars,          # overlays dashed "Global (bary)"
+            # loo_pbars=fedrl_server.last_loo_bary if you maintain it as [N,K,A]
+        )
+
+    compile_gifs(
+        algo="fedrl",            
+        out_root=getattr(cfg, "plot_dir", "plots"),
+        n_clients=env.n_clients,
+        n_arms=cfg.n_arms,
+        fps=6,
+    )
 
     return summary
