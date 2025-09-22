@@ -13,7 +13,7 @@ from envs.case_study_1_1.bandits import HeteroBandit
 from utils.general import normalize_weights, normalize_hist
 
 from eval.tabular import compute_metrics
-from eval.distributions import save_round_plots, compile_gifs
+from eval.distributions import save_round_plots, compile_videos
 
 
 def train_local(env: HeteroBandit, cfg: Config, summary: Dict):
@@ -88,21 +88,22 @@ def train_local(env: HeteroBandit, cfg: Config, summary: Dict):
         for k, v in avg_metrics.items():
             summary['local']['metrics'][k].append(v)
 
-        save_round_plots(
-            algo="local",
-            round_idx=round,
-            client_models=client_models,
-            env=env,
-            z=z_np,
-            out_root=getattr(cfg, "plot_dir", "plots"),
-        )
+        if False:
+            save_round_plots(
+                algo="local",
+                round_idx=round,
+                client_models=client_models,
+                env=env,
+                z=z_np,
+                out_root=getattr(cfg, "plot_dir", "plots"),
+            )
 
-    compile_gifs(
-        algo="local",              
-        out_root=getattr(cfg, "plot_dir", "plots"),
-        n_clients=env.n_clients,
-        n_arms=cfg.n_arms,
-        fps=6,
-    )
+    if False:
+        compile_videos(
+            algo="local",              
+            out_root=getattr(cfg, "plot_dir", "plots"),
+            n_clients=env.n_clients,
+            n_arms=cfg.n_arms,
+        )
 
     return summary

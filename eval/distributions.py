@@ -21,7 +21,7 @@ def save_round_plots(
     env,
     z: np.ndarray,                         # shape [A]
     out_root: str = "plots",
-    truth_nsamp: int = 50_000,
+    truth_nsamp: int = 30_000,
     global_pbars: Optional[np.ndarray] = None,  # shape [K, A] if provided
     loo_pbars: Optional[np.ndarray] = None,     # shape [N, K, A] if provided
     save_npz: bool = False,
@@ -92,20 +92,21 @@ def save_round_plots(
                     p_loo=(p_loo if p_loo is not None else np.array([])),
                 )
 
-
-def compile_gifs(
+def compile_videos(
     *,
     algo: str,
     out_root: str,
     n_clients: int,
     n_arms: int,
-    fps: int = 6,
+    fps: int = 100,
     pattern: str = "round_*",
+    ext: str = "mp4",               # "mp4" (H.264) or "webm"
+    codec: str = "libx264",         # use "libvpx-vp9" for webm
+    crf: int = 23,                  # lower = higher quality; 18–28 is typical
 ) -> None:
-
     base = Path(out_root) / algo
-    gif_dir = base / "gifs"
-    _ensure_dir(gif_dir)
+    vid_dir = base / "videos"
+    vid_dir.mkdir(parents=True, exist_ok=True)
 
     rounds = sorted(base.glob(pattern))
     for i in range(n_clients):
@@ -115,6 +116,14 @@ def compile_gifs(
                 f = r / f"client_{i:02d}_arm_{a:02d}.png"
                 if f.exists():
                     frames.append(iio.imread(f))
-            if frames:
-                out = gif_dir / f"client_{i:02d}_arm_{a:02d}.gif"
-                iio.mimsave(out, frames, duration=1.0 / fps)
+            if not frames:
+                continue
+
+            out = vid_dir / f"client_{i:02d}_arm_{a:02d}.{ext}"
+            # Requires ffmpeg in PATH
+            with iio.get_writer(
+                out, fps=fps, codec=codec, quality=None, macro_block_size=None
+            ) as w:
+                for fr in frames:
+                    w.append_data(fr)
+

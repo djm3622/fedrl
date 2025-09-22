@@ -5,10 +5,10 @@ model:
   grad_clip: 10.0
 
   seeds:
-    - 0
-    - 1
     - 2
     - 3
+    - 4
+    - 5
 
 federation:
   num_communication_rounds: 1000

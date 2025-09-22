@@ -140,3 +140,13 @@ def load_config(path: str) -> Config:
 
 def _ensure_dir(p: Path) -> None:
     p.mkdir(parents=True, exist_ok=True)
+
+
+def pick_device() -> torch.device:
+    # Apple Silicon GPU (Metal)
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and torch.backends.mps.is_built():
+        return torch.device("mps")
+    # NVIDIA CUDA (Linux/Windows, not macOS)
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    return torch.device("cpu")
