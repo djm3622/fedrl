@@ -67,7 +67,9 @@ class TrainCfg:
     lr: float = 3e-4
     max_grad_norm: float = 0.5
     seed: int = 42
-    log_interval: int = 10
+    log_interval: int = 1_000      # print every 10k steps, not 10
+    gif_every_steps: int = 50_000   # 0 to disable; otherwise save GIF this often
+    record_rollouts: bool = False   # gate per-step frame capture
 
 
 # -------------------------
@@ -200,9 +202,11 @@ def train():
     next_log = cfg.log_interval  # optional threshold if you prefer threshold-based logging
 
     while total_env_steps < cfg.total_steps:
-        # ----- collect rollout -----
+        last_gif_dump = 0
+
+        # inside while total_env_steps < cfg.total_steps:
         roll.clear()
-        frames: List[np.ndarray] = []  # collect frames for this rollout
+        frames = [] if cfg.record_rollouts else None
 
         for _ in range(cfg.rollout_len):
             ego_bna = ego_list_to_tchw(actor_obs).to(device)        # [A, C, k, k]
@@ -223,8 +227,10 @@ def train():
             (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
 
             # capture frame AFTER the step so you see the result of the actions
-            frame = capture_frame(env)
-            frames.append(frame)
+            if cfg.record_rollouts:
+                frame = capture_frame(env)
+                if frame is not None:
+                    frames.append(frame)
 
             # store
             roll.add(
@@ -253,9 +259,10 @@ def train():
                 ep_len = 0
 
                 # also capture a frame at reset if available (optional)
-                frame = capture_frame(env)
-                if frame is not None:
-                    frames.append(frame)
+                if cfg.record_rollouts:
+                    frame = capture_frame(env)
+                    if frame is not None:
+                        frames.append(frame)
 
             if roll.full():
                 break
@@ -327,14 +334,18 @@ def train():
                 opt_actor.step()
 
         # logging + video dump
+        # ----- logging + video dump -----
+        if total_env_steps - last_gif_dump >= cfg.gif_every_steps and cfg.gif_every_steps > 0:
+            if frames:  # only if we actually recorded
+                gif_path = os.path.join(gif_outdir, f"rollout_steps_{total_env_steps}.gif")
+                save_gif(frames, gif_path, fps=10)
+                print(f"[saved rollout video -> {gif_path}]", flush=True)
+            last_gif_dump = total_env_steps
+
         if total_env_steps % cfg.log_interval == 0:
             mean_ret = np.mean(ep_returns[-10:]) if ep_returns else 0.0
             print(f"steps={total_env_steps}  mean_ep_ret_10={mean_ret:.2f}  last_v={last_v.item():.2f}", flush=True)
 
-            # save gif for the last rollout
-            gif_path = os.path.join(gif_outdir, f"rollout_steps_{total_env_steps}.gif")
-            save_gif(frames, gif_path, fps=10)
-            print(f"[saved rollout video -> {gif_path}]", flush=True)
 
 
 

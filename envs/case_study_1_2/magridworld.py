@@ -78,8 +78,8 @@ class MultiAgentGridConfig:
     # --- pushing economics ---
     # Use a lower-magnitude penalty when a push succeeds (replaces step_cost for pushers on that step)
     use_push_step_cost: bool = True         # NEW: if True, use push_step_cost instead of step_cost for pushers
-    push_step_cost: float = -0.05           # NEW: per-step cost for successful push (|push_step_cost| < |step_cost|)
-    push_fail_penalty: float = -0.1        # NEW: extra penalty when a push was attempted but failed to move the object
+    push_step_cost: float = 0.0           # NEW: per-step cost for successful push (|push_step_cost| < |step_cost|)
+    push_fail_penalty: float = 0.0        # NEW: extra penalty when a push was attempted but failed to move the object
 
 
     # Stacking options on goals
@@ -788,7 +788,7 @@ def make_aligned_client_cfg(
     hazard_bounds: Tuple[int, int, int, int] = (2, 6, 4, 8),
     starts: Optional[Sequence[Coord]] = None,
     goals: Optional[Sequence[Coord]] = None,
-    hazard_prob: float = 0.20,
+    hazard_prob: float = 0.05,
     hazard_loss: float = 120.0,
     seed: Optional[int] = 42,
 ) -> MultiAgentGridConfig:
@@ -829,8 +829,8 @@ def make_aligned_client_cfg(
         invalid_move_penalty=-0.1,
         max_steps=120,
         n_agents=n_agents,
-        slip_prob=0.05,
-        sample_active_hazard_each_episode=True,
+        slip_prob=0.00,
+        sample_active_hazard_each_episode=False,
         block_on_collision=True,
         critic_obs_mode="grid",
         actor_obs_mode="ego",
@@ -839,7 +839,7 @@ def make_aligned_client_cfg(
         object_starts=((6, 1), (2, 1), (5, 8)),  # 3 objects by default
         object_goal=(9, 5),
         require_two_pushers=False,
-        object_push_penalty=0.01,
+        object_push_penalty=0.0,
         seed=seed,
     )
     cfg.validate()
