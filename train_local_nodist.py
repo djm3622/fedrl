@@ -55,7 +55,7 @@ def save_gif(frames, path, fps=10):
 @dataclass
 class TrainCfg:
     device = pick_device()
-    total_steps: int = 100_000
+    total_steps: int = 1_000_000
     rollout_len: int = 512
     update_epochs: int = 4
     minibatches: int = 4
@@ -67,7 +67,7 @@ class TrainCfg:
     lr: float = 3e-4
     max_grad_norm: float = 0.5
     seed: int = 42
-    log_interval: int = 1
+    log_interval: int = 10
 
 
 # -------------------------
@@ -196,7 +196,7 @@ def train():
 
     print("Starting training...")
 
-    gif_outdir = os.path.join("outputs", "rollouts")
+    gif_outdir = os.path.join("outputs", "rollouts1")
     next_log = cfg.log_interval  # optional threshold if you prefer threshold-based logging
 
     while total_env_steps < cfg.total_steps:
