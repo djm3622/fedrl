@@ -33,7 +33,7 @@ class MultiAgentGridConfig:
     # agents far apart by default
     starts: Sequence[Coord] = ((9, 0), (0, 0), (9, 9))
     # single shared goal near top right
-    goals: Sequence[Coord] = ((0, 9),)
+    goals: Sequence[Coord] = ((0, 5),)
 
     # map layout
     obstacles: Iterable[Coord] = field(default_factory=list)
@@ -48,13 +48,13 @@ class MultiAgentGridConfig:
     hazard_loss: float = 120.0
 
     # base costs/rewards
-    step_cost: float = -1.0
+    step_cost: float = -0.1
     goal_reward: float = +100.0
     catastrophe_reward: float = -120.0
 
     # penalties / limits
-    invalid_move_penalty: float = -2.0
-    max_steps: int = 200
+    invalid_move_penalty: float = -0.1
+    max_steps: int = 120
 
     # MARL and dynamics
     n_agents: int = 3
@@ -70,16 +70,16 @@ class MultiAgentGridConfig:
     # Movable object (crate) and pushing rules
     has_objects: bool = True
     object_starts: Sequence[Coord] = ((6, 2), (6, 3), (6, 4))  # 3 objects by default
-    object_goal: Optional[Coord] = (0, 8)
+    object_goal: Optional[Coord] = (9, 5)
     require_two_pushers: bool = False
     object_push_penalty: float = 0.05  # shaping penalty per push, if any
-    object_reward: float = 100.0    # NEW: one-time bonus per object delivered
+    object_reward: float = 300.0    # NEW: one-time bonus per object delivered
 
     # --- pushing economics ---
     # Use a lower-magnitude penalty when a push succeeds (replaces step_cost for pushers on that step)
     use_push_step_cost: bool = True         # NEW: if True, use push_step_cost instead of step_cost for pushers
-    push_step_cost: float = -0.25           # NEW: per-step cost for successful push (|push_step_cost| < |step_cost|)
-    push_fail_penalty: float = -0.25        # NEW: extra penalty when a push was attempted but failed to move the object
+    push_step_cost: float = -0.05           # NEW: per-step cost for successful push (|push_step_cost| < |step_cost|)
+    push_fail_penalty: float = -0.1        # NEW: extra penalty when a push was attempted but failed to move the object
 
 
     # Stacking options on goals
@@ -795,7 +795,7 @@ def make_aligned_client_cfg(
     if starts is None:
         starts = [(H - 1, 0), (0, 0), (H - 1, W - 1)][:n_agents]
     if goals is None:
-        goals = [(0, W - 1)]  # shared agent-goal
+        goals = [(0, 5)]  # shared agent-goal
 
     # --- compute a centered 2x2 hazard zone (inclusive bounds) ---
     r0 = (H // 2) - 1
@@ -823,11 +823,11 @@ def make_aligned_client_cfg(
 
         hazard_prob=hazard_prob,
         hazard_loss=hazard_loss,
-        step_cost=-1.0,
+        step_cost=-0.2,
         goal_reward=+100.0,
         catastrophe_reward=-hazard_loss,
-        invalid_move_penalty=-2.0,
-        max_steps=200,
+        invalid_move_penalty=-0.1,
+        max_steps=120,
         n_agents=n_agents,
         slip_prob=0.05,
         sample_active_hazard_each_episode=True,
@@ -836,10 +836,10 @@ def make_aligned_client_cfg(
         actor_obs_mode="ego",
         ego_k=5,
         has_objects=True,
-        object_starts=((6, 2), (2, 2), (7, 4)),  # 3 objects by default
-        object_goal=(0, 8),
+        object_starts=((6, 1), (2, 1), (5, 8)),  # 3 objects by default
+        object_goal=(9, 5),
         require_two_pushers=False,
-        object_push_penalty=0.0,
+        object_push_penalty=0.01,
         seed=seed,
     )
     cfg.validate()
