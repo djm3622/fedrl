@@ -1,0 +1,19 @@
+CentralCritic(
+  (encoder): GlobalEncoder(
+    (conv): Sequential(
+      (0): Conv2d(6, 32, kernel_size=(5, 5), stride=(2, 2), padding=(2, 2))
+      (1): ReLU(inplace=True)
+      (2): Conv2d(32, 64, kernel_size=(3, 3), stride=(2, 2), padding=(1, 1))
+      (3): ReLU(inplace=True)
+      (4): Conv2d(64, 64, kernel_size=(3, 3), stride=(1, 1), padding=(1, 1))
+      (5): ReLU(inplace=True)
+    )
+    (head): Sequential(
+      (0): Linear(in_features=576, out_features=256, bias=True)
+      (1): ReLU(inplace=True)
+      (2): Linear(in_features=256, out_features=256, bias=True)
+      (3): ReLU(inplace=True)
+    )
+  )
+  (v): Linear(in_features=256, out_features=1, bias=True)
+)

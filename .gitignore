@@ -1,7 +1,9 @@
 outputs/
 plots/
-test.ipynb
 std_out/
+wandb/
+
+test.ipynb
 batch_train.sh
 
 # Byte-compiled / optimized / DLL files

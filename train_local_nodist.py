@@ -6,9 +6,14 @@
 from __future__ import annotations
 import os
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from typing import Tuple, List
 import imageio.v2 as imageio  # for GIF writing
+from utils.wandb_helper import (
+    init_wandb, log_singular_value, log_losses, log_figure,
+    log_table, save_model_architecture, finish_run
+)
+import wandb
 
 import numpy as np
 import torch
@@ -67,9 +72,15 @@ class TrainCfg:
     lr: float = 3e-4
     max_grad_norm: float = 0.5
     seed: int = 42
-    log_interval: int = 1_000      # print every 10k steps, not 10
+    log_interval: int = 10      # print every 10k steps, not 10
     gif_every_steps: int = 50_000   # 0 to disable; otherwise save GIF this often
     record_rollouts: bool = False   # gate per-step frame capture
+
+    # --- NEW: W&B ---
+    wandb_project: str = "mappo-gridworld"
+    wandb_run_name: str = "case_study_1_2"
+    wandb_mode: str = "online"   # "offline" or "disabled" if you want local only
+    log_video: bool = False      # guard for heavy media logging
 
 
 # -------------------------
@@ -171,6 +182,15 @@ def train():
     device = torch.device(cfg.device)
     print(f"Using device: {device}")
 
+    init_wandb(
+        project_name=cfg.wandb_project,
+        run_name=cfg.wandb_run_name,
+        config=asdict(cfg),
+    )
+    # Save textual architecture once
+    save_model_architecture(model.actor, save_path="artifacts/actor_")
+    save_model_architecture(model.critic, save_path="artifacts/critic_")
+
     model.actor.to(device)
     model.critic.to(device)
 
@@ -214,9 +234,10 @@ def train():
             agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
 
             # policy for each agent
-            dists = model.actor(ego_bna, agent_ids)
-            actions = dists.sample()
-            logprobs = dists.log_prob(actions)
+            with torch.no_grad():
+                dists = model.actor(ego_bna, agent_ids)
+                actions = dists.sample()
+                logprobs = dists.log_prob(actions)
 
             # centralized value once per state
             with torch.no_grad():
@@ -276,6 +297,13 @@ def train():
         adv, ret = compute_gae(roll, last_value=float(last_v.item()), gamma=cfg.gamma, lam=cfg.gae_lambda, device=cfg.device)
         adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
 
+        total_v_loss = 0.0
+        total_policy_loss = 0.0
+        total_entropy = 0.0
+        total_clip_frac = 0.0
+        total_approx_kl = 0.0
+        n_mb = 0
+
         # ----- flatten per-agent items for actor updates -----
         B = roll.ptr
         logp_flat = roll.logprobs[:B].reshape(B * n_agents)
@@ -328,10 +356,27 @@ def train():
                 entropy = dists_new.entropy().mean()
                 loss = policy_loss - cfg.ent_coef * entropy
 
+                # accumulate metrics
+                total_v_loss += v_loss.detach().item()
+                total_policy_loss += policy_loss.detach().item()
+                total_entropy += entropy.detach().item()
+                n_mb += 1
+
                 opt_actor.zero_grad(set_to_none=True)
                 loss.backward()
                 nn.utils.clip_grad_norm_(model.actor.parameters(), cfg.max_grad_norm)
                 opt_actor.step()
+
+        mb_div = max(n_mb, 1)
+        log_metrics = {
+            "loss/value": total_v_loss / mb_div,
+            "loss/policy": total_policy_loss / mb_div,
+            "policy/entropy": total_entropy / mb_div,
+            "optim/lr_actor": opt_actor.param_groups[0]["lr"],
+            "optim/lr_critic": opt_critic.param_groups[0]["lr"],
+            "rollout/len": B,
+        }
+        wandb.log(log_metrics, step=total_env_steps)
 
         # logging + video dump
         # ----- logging + video dump -----
@@ -344,6 +389,25 @@ def train():
 
         if total_env_steps % cfg.log_interval == 0:
             mean_ret = np.mean(ep_returns[-10:]) if ep_returns else 0.0
+            log_payload = {
+                "train/mean_ep_ret_10": mean_ret,
+                "train/last_v": float(last_v.item()),
+                "env/episodes": len(ep_returns),
+                "env/steps": total_env_steps,
+            }
+            wandb.log(log_payload, step=total_env_steps)
+            with torch.no_grad():
+                # dists was computed per-step during collection; here we can recompute on current obs:
+                d = model.actor(ego_list_to_tchw(actor_obs).to(device),
+                                torch.arange(n_agents, device=device))
+                probs = d.probs.detach().cpu().numpy()  # [A, 4]
+                # average over agents
+                wandb.log({
+                    "policy/action_prob_right": probs[:,1].mean(),
+                    "policy/action_prob_up":    probs[:,0].mean(),
+                    "policy/action_prob_down":  probs[:,2].mean(),
+                    "policy/action_prob_left":  probs[:,3].mean(),
+                }, step=total_env_steps)
             print(f"steps={total_env_steps}  mean_ep_ret_10={mean_ret:.2f}  last_v={last_v.item():.2f}", flush=True)
 
 
@@ -354,3 +418,5 @@ def train():
 
 if __name__ == "__main__":
     train()
+    finish_run()
+
