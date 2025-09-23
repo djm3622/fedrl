@@ -142,7 +142,7 @@ class MAPPOModel:
     critic: CentralCritic
 
     @staticmethod
-    def build(n_actions: int = 4, ego_k: int = 5, n_agents: int = 3,
+    def build(n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
               hidden_dim: int = 128, eps_explore: float = 0.05) -> "MAPPOModel":
         return MAPPOModel(
             actor=ActorPolicy(n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,

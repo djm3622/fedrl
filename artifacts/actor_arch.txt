@@ -15,5 +15,5 @@ ActorPolicy(
     )
   )
   (gru): GRUCell(128, 128)
-  (pi): Linear(in_features=128, out_features=4, bias=True)
+  (pi): Linear(in_features=128, out_features=5, bias=True)
 )

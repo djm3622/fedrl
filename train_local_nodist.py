@@ -60,7 +60,7 @@ def save_gif(frames, path, fps=10):
 @dataclass
 class TrainCfg:
     device = pick_device()
-    total_steps: int = 1_000_000
+    total_steps: int = 100_000_000
     rollout_len: int = 512
     update_epochs: int = 4
     minibatches: int = 4
@@ -68,11 +68,12 @@ class TrainCfg:
     gae_lambda: float = 0.95
     clip_eps: float = 0.2
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
-    lr: float = 3e-4
+    ent_coef: float = 0.02
+    lr: float = 1e-4
     max_grad_norm: float = 0.5
     seed: int = 42
-    log_interval: int = 10      # print every 10k steps, not 10
+    log_interval: int = 1_000      # print every 10k steps, not 10
+    eval_every_steps: int = 100_000
 
     # --- NEW: W&B ---
     wandb_project: str = "mappo-gridworld"
@@ -170,7 +171,7 @@ def compute_gae(roll: RolloutBuffer, last_value: float, gamma: float, lam: float
 def make_env_and_model(seed: int) -> Tuple[MultiAgentGridWorld, MAPPOModel]:
     cfg = make_aligned_client_cfg(n_agents=3, H=10, W=10, seed=seed)
     env = MultiAgentGridWorld(cfg)
-    model = MAPPOModel.build(n_actions=4, ego_k=cfg.ego_k, n_agents=cfg.n_agents)
+    model = MAPPOModel.build(n_actions=5, ego_k=cfg.ego_k, n_agents=cfg.n_agents)  # <-- 5
     return env, model
 
 
@@ -221,11 +222,9 @@ def train():
     ep_returns = []
     ep_len = 0
     ep_return = 0.0
+    next_eval = cfg.eval_every_steps
 
     print("Starting training...")
-
-    gif_outdir = os.path.join("outputs", "rollouts1")
-    next_log = cfg.log_interval  # optional threshold if you prefer threshold-based logging
 
     while total_env_steps < cfg.total_steps:
         last_gif_dump = 0
@@ -252,6 +251,7 @@ def train():
             # env step
             act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
             (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
+            h_actor = h_out.detach()
 
             # store
             roll.add(
@@ -275,22 +275,27 @@ def train():
             actor_obs, critic_obs = actor_obs_next, critic_obs_next
 
             if terminated or truncated:
-                h_actor = model.actor.init_hidden(n_agents, device)
-                (actor_obs, critic_obs), _ = env.reset()
-                ep_returns.append(ep_return)
-                ep_return = 0.0
-                ep_len = 0
-
-                 # Build per-episode metrics from the final `info`
+                # --- log BEFORE reset ---
+                ep_len_this = ep_len
+                ep_return_this = ep_return
                 term_reason = info.get("terminated_by", "unknown")
+
                 wandb.log({
-                    "ep/len": ep_len,
-                    "ep/return_team": ep_return,
+                    "ep/len": ep_len_this,
+                    "ep/return_team": ep_return_this,
                     "ep/objects_delivered_total": int(info.get("objects_delivered_total", 0)),
                     "ep/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
                     "ep/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
                     "ep/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
                 }, step=total_env_steps)
+
+                ep_returns.append(ep_return_this)
+
+                # --- reset AFTER logging ---
+                h_actor = model.actor.init_hidden(n_agents, device)
+                (actor_obs, critic_obs), _ = env.reset()
+                ep_return = 0.0
+                ep_len    = 0
 
             if roll.full():
                 break
@@ -394,35 +399,26 @@ def train():
         # ----- logging + video dump -----
         if total_env_steps % cfg.log_interval == 0:
             mean_ret = np.mean(ep_returns[-10:]) if ep_returns else 0.0
-            log_payload = {
+            wandb.log({
                 "train/mean_ep_ret_10": mean_ret,
                 "train/last_v": float(last_v.item()),
                 "env/episodes": len(ep_returns),
                 "env/steps": total_env_steps,
-            }
-            wandb.log(log_payload, step=total_env_steps)
-            with torch.no_grad():
-                ego_t = ego_list_to_tchw(actor_obs).to(device)
-                ids_t = torch.arange(n_agents, device=device)
-                out = model.actor(ego_t, ids_t)
-                d = out[0] if isinstance(out, tuple) else out   # handle GRU (tuple) or FF (dist)
-                probs = d.probs.detach().cpu().numpy()
-                # average over agents
-                wandb.log({
-                    "policy/action_prob_right": probs[:,1].mean(),
-                    "policy/action_prob_up":    probs[:,0].mean(),
-                    "policy/action_prob_down":  probs[:,2].mean(),
-                    "policy/action_prob_left":  probs[:,3].mean(),
-                }, step=total_env_steps)
-            print(f"steps={total_env_steps}  mean_ep_ret_10={mean_ret:.2f}  last_v={last_v.item():.2f}", flush=True)
+            }, step=total_env_steps)
+
+
+        if total_env_steps >= next_eval:
+            eval_gif = f"outputs/eval/eval_ep_{total_env_steps}.gif"
             eval_stats = run_eval_rollout(
                 env, model, device,
                 deterministic=False,
                 record=True,
-                log_wandb=True,                 # set True to push to W&B
-                gif_path="outputs/eval/eval_ep.gif"
+                log_wandb=True,
+                gif_path=eval_gif,
+                wb_step=total_env_steps,      # <--- new arg
             )
-            print(eval_stats)
+            print(f"[eval] step={total_env_steps}  saved={eval_stats.get('eval/gif_path', 'None')}")
+            next_eval += cfg.eval_every_steps
 
     print("Training complete.")
 
@@ -433,15 +429,19 @@ def run_eval_rollout(
     model,
     device: torch.device,
     *,
-    deterministic: bool = True,
+    deterministic: bool = False,
     max_steps: Optional[int] = None,
-    record: bool = False,
+    record: bool = True,
     gif_path: Optional[str] = None,
-    log_wandb: bool = False,
+    log_wandb: bool = True,
+    wb_step: Optional[int] = None,   # pass total_env_steps when calling if you want nice W&B step alignment
 ) -> dict:
     """
     Run ONE evaluation episode (no gradient). Compatible with FF or GRU actor.
-    If GRU is present, we pass/maintain h and set exploration eps=0 during eval.
+    - Turns off epsilon-mixing during eval and restores it after.
+    - Works for 4 actions (UDLR) or 5 (UDLR + stay).
+    - If `record=True`, captures an initial frame so the GIF is never empty.
+    - If `log_wandb=True`, logs both metrics and the GIF (if written).
     """
     model.actor.eval()
     model.critic.eval()
@@ -449,21 +449,17 @@ def run_eval_rollout(
     (actor_obs, critic_obs), _ = env.reset()
     n_agents = env.cfg.n_agents
 
-    # --- GRU support: create hidden if the actor exposes it ---
+    # GRU support
     has_gru = hasattr(model.actor, "init_hidden") and hasattr(model.actor, "hidden_dim")
-    if has_gru:
-        h = model.actor.init_hidden(n_agents, device)  # [A, H]
-    else:
-        h = None
+    h = model.actor.init_hidden(n_agents, device) if has_gru else None
 
-    # --- turn off epsilon mixing during eval (if available) ---
+    # Turn off exploration eps during eval (restore later)
     eps_restore = None
     if hasattr(model.actor, "set_exploration_eps"):
-        # keep original to restore after eval
         eps_restore = float(getattr(model.actor, "_eps_explore", 0.0))
         model.actor.set_exploration_eps(0.0)
 
-    # per-episode accumulators
+    # Accumulators
     team_return = 0.0
     per_agent_return = np.zeros(n_agents, dtype=np.float64)
     steps = 0
@@ -472,57 +468,60 @@ def run_eval_rollout(
     object_move_steps = 0
     last_obj_positions = None
 
-    probs_running_sum = np.zeros(4, dtype=np.float64)
+    probs_running_sum = None
     probs_count = 0
 
     frames = [] if record else None
+    # Capture frame at reset so GIF is never empty
+    if record:
+        f0 = capture_frame(env)
+        if f0 is not None:
+            frames.append(f0)
 
     while True:
         ego_bna = ego_list_to_tchw(actor_obs).to(device)       # [A,C,k,k]
         glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)   # [1,C,H,W]
         agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
 
-        # --- policy forward (FF or GRU) ---
+        # Policy forward (FF or GRU)
         if has_gru:
-            # Prefer explicit override if actor supports it; else eps is 0.0 already.
             if "eps_override" in model.actor.forward.__code__.co_varnames:
                 dists, h = model.actor(ego_bna, agent_ids, h_in=h, eps_override=0.0)
             else:
                 dists, h = model.actor(ego_bna, agent_ids, h_in=h)
         else:
             out = model.actor(ego_bna, agent_ids)
-            if isinstance(out, tuple):
-                dists = out[0]
-            else:
-                dists = out
+            dists = out[0] if isinstance(out, tuple) else out
 
-        # choose actions
+        # Choose actions
         if deterministic:
-            actions = torch.argmax(dists.probs, dim=-1)        # [A]
+            actions = torch.argmax(dists.probs, dim=-1)  # [A]
         else:
             actions = dists.sample()
 
-        # track action probs
-        probs = dists.probs.detach().cpu().numpy()             # [A,4]
+        # Track action probs (support 4 or 5 actions)
+        probs = dists.probs.detach().cpu().numpy()       # [A, n_actions]
+        if probs_running_sum is None:
+            probs_running_sum = np.zeros(probs.shape[1], dtype=np.float64)
         probs_running_sum += probs.mean(axis=0)
         probs_count += 1
 
-        # env step
+        # Env step
         act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
         (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
 
-        # record frame
+        # Record frame after step
         if record:
             f = capture_frame(env)
             if f is not None:
                 frames.append(f)
 
-        # returns
+        # Returns
         team_return += float(team_rew)
         if "rewards_per_agent" in info and isinstance(info["rewards_per_agent"], (list, tuple)):
             per_agent_return += np.array(info["rewards_per_agent"], dtype=np.float64)
 
-        # deliveries & object motion
+        # Deliveries & object motion
         if "objects_delivered_new" in info:
             deliveries += int(info.get("objects_delivered_new", 0))
             if first_delivery_t is None and info.get("objects_delivered_total", 0) > 0:
@@ -537,7 +536,7 @@ def run_eval_rollout(
         steps += 1
         actor_obs, critic_obs = actor_obs_next, critic_obs_next
 
-        # stop
+        # Stop
         if terminated or truncated:
             break
         if max_steps is not None and steps >= max_steps:
@@ -546,8 +545,9 @@ def run_eval_rollout(
     term_reason = info.get("terminated_by", "unknown")
     success_full = (term_reason == "all_goals_and_objects")
     success_any_delivery = (info.get("objects_delivered_total", 0) > 0)
-    mean_action_probs = probs_running_sum / max(probs_count, 1)
+    mean_action_probs = (probs_running_sum / max(probs_count, 1)) if probs_running_sum is not None else np.zeros(4)
 
+    # Base metrics
     metrics = {
         "eval/steps": steps,
         "eval/team_return": float(team_return),
@@ -559,16 +559,23 @@ def run_eval_rollout(
         "eval/terminated_by": term_reason,
         "eval/success_full_completion": bool(success_full),
         "eval/success_any_delivery": bool(success_any_delivery),
-        "eval/action_prob_up": float(mean_action_probs[0]),
-        "eval/action_prob_right": float(mean_action_probs[1]),
-        "eval/action_prob_down": float(mean_action_probs[2]),
-        "eval/action_prob_left": float(mean_action_probs[3]),
     }
 
-    if record and gif_path and frames:
-        save_gif(frames, gif_path, fps=10)
-        metrics["eval/gif_path"] = gif_path
+    # Action prob metrics (dynamic: 4 or 5 actions)
+    action_names = ["up", "right", "down", "left", "stay"][: len(mean_action_probs)]
+    for idx, name in enumerate(action_names):
+        metrics[f"eval/action_prob_{name}"] = float(mean_action_probs[idx])
 
+    # Save GIF (if any frames)
+    if record and gif_path and frames and len(frames) > 0:
+        os.makedirs(os.path.dirname(gif_path), exist_ok=True)
+        try:
+            save_gif(frames, gif_path, fps=10)
+            metrics["eval/gif_path"] = gif_path
+        except Exception as e:
+            metrics["eval/gif_error"] = str(e)
+
+    # Log to W&B (metrics + video)
     if log_wandb:
         term_flags = {
             "eval/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
@@ -576,10 +583,14 @@ def run_eval_rollout(
             "eval/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
             "eval/term/other": 1.0 if term_reason not in ("time_limit", "catastrophe", "all_goals_and_objects") else 0.0,
         }
-        import wandb
-        wandb.log({**metrics, **term_flags})
+        wandb.log({**metrics, **term_flags}, step=wb_step)
+        if record and gif_path and os.path.exists(gif_path):
+            try:
+                wandb.log({"eval/gif": wandb.Video(gif_path, fps=10, format="gif")}, step=wb_step)
+            except Exception as e:
+                wandb.log({"eval/gif_upload_error": str(e)}, step=wb_step)
 
-    # restore training epsilon if we changed it
+    # Restore exploration epsilon
     if eps_restore is not None and hasattr(model.actor, "set_exploration_eps"):
         model.actor.set_exploration_eps(eps_restore)
 

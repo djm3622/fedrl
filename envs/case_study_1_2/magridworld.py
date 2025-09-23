@@ -404,27 +404,50 @@ class MultiAgentGridWorld:
                 new_positions[i] = cand
 
 
-
-        # collisions blocked, but optionally allow stacking on agent goals
         if self.cfg.block_on_collision:
-            counts: Dict[Coord, int] = {}
-            for cand in new_positions:
-                counts[cand] = counts.get(cand, 0) + 1
+            # map proposed cell -> list of agents wanting it
+            where: Dict[Coord, List[int]] = {}
+            for i, cand in enumerate(new_positions):
+                if self._done_agents[i]:
+                    continue
+                where.setdefault(cand, []).append(i)
 
-            # set of all agent-goal cells (one or many)
-            goal_cells = set(self.cfg.goals if len(self.cfg.goals) == self.cfg.n_agents else [self.cfg.goals[0]])
+            goal_cells = set(self.cfg.goals if len(self.cfg.goals) == self.cfg.n_agents
+                            else [self.cfg.goals[0]])
 
+            for cand, idxs in where.items():
+                if len(idxs) <= 1:
+                    continue
+
+                # allow stacking only on agent goal cells if enabled
+                if self.cfg.allow_multi_agent_on_goal and cand in goal_cells:
+                    continue
+
+                # prefer current occupant if someone is staying on the cell
+                current_occupants = [i for i in idxs if self._pos[i] == cand]
+                if current_occupants:
+                    winner = min(current_occupants)       # deterministic tie-break
+                else:
+                    winner = min(idxs)                    # deterministic among movers
+
+                # all losers bounce back to their old cells and get penalized
+                for j in idxs:
+                    if j == winner:
+                        continue
+                    rewards_per_agent[j] += self.cfg.invalid_move_penalty
+                    new_positions[j] = self._pos[j]
+
+            # prevent head-on swaps (A↔B)
             for i in range(self.cfg.n_agents):
                 if self._done_agents[i]:
                     continue
-                cand = new_positions[i]
-                on_agent_goal = cand in goal_cells
-                multiple_here = counts.get(cand, 0) > 1
-
-                # if multiple agents move onto the same goal cell and stacking is allowed, do not treat as collision
-                if multiple_here and not (self.cfg.allow_multi_agent_on_goal and on_agent_goal):
-                    rewards_per_agent[i] += self.cfg.invalid_move_penalty
-                    new_positions[i] = self._pos[i]
+                for j in range(i + 1, self.cfg.n_agents):
+                    if self._done_agents[j]:
+                        continue
+                    if new_positions[i] == self._pos[j] and new_positions[j] == self._pos[i]:
+                        # break tie deterministically; j loses
+                        rewards_per_agent[j] += self.cfg.invalid_move_penalty
+                        new_positions[j] = self._pos[j]
 
         # commit positions
         self._pos = new_positions
