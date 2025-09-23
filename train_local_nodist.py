@@ -73,8 +73,6 @@ class TrainCfg:
     max_grad_norm: float = 0.5
     seed: int = 42
     log_interval: int = 10      # print every 10k steps, not 10
-    gif_every_steps: int = 50_000   # 0 to disable; otherwise save GIF this often
-    record_rollouts: bool = False   # gate per-step frame capture
 
     # --- NEW: W&B ---
     wandb_project: str = "mappo-gridworld"
@@ -111,7 +109,7 @@ def ego_list_to_tchw(ego_list: List[np.ndarray]) -> torch.Tensor:
 # -------------------------
 class RolloutBuffer:
     def __init__(self, n_agents: int, ego_shape: Tuple[int, int, int], glob_shape: Tuple[int, int, int],
-                 rollout_len: int, device: str):
+                 rollout_len: int, device: str, hidden_dim: int = 128):
         self.n_agents = n_agents
         self.rollout_len = rollout_len
         self.device = device
@@ -128,10 +126,11 @@ class RolloutBuffer:
         self.values = torch.zeros(B, device=device)
         self.rewards = torch.zeros(B, device=device)       # team reward
         self.dones = torch.zeros(B, device=device)
+        self.h_actor = torch.zeros(B, n_agents, hidden_dim, device=device)
 
         self.ptr = 0
 
-    def add(self, ego_bna, agent_ids, glob_b, act_bna, logp_bna, v_b, rew_b, done_b):
+    def add(self, ego_bna, agent_ids, glob_b, act_bna, logp_bna, v_b, rew_b, done_b, h_actor_in):
         t = self.ptr
         self.ego[t] = ego_bna
         self.agent_ids[t] = agent_ids
@@ -141,6 +140,7 @@ class RolloutBuffer:
         self.values[t] = v_b
         self.rewards[t] = rew_b
         self.dones[t] = done_b
+        self.h_actor[t] = h_actor_in    # <--- NEW
         self.ptr += 1
 
     def full(self) -> bool:
@@ -194,6 +194,11 @@ def train():
     model.actor.to(device)
     model.critic.to(device)
 
+    model.actor.set_exploration_eps(0.05)
+
+    hidden_dim = model.actor.hidden_dim
+    h_actor = model.actor.init_hidden(env.cfg.n_agents, device)  # [A, H]
+
     opt_actor = optim.Adam(model.actor.parameters(), lr=cfg.lr)
     opt_critic = optim.Adam(model.critic.parameters(), lr=cfg.lr)
 
@@ -209,6 +214,7 @@ def train():
         glob_shape=(glob0.shape[0], glob0.shape[1], glob0.shape[2]),
         rollout_len=cfg.rollout_len,
         device=cfg.device,
+        hidden_dim=hidden_dim,                      # <--- NEW
     )
 
     total_env_steps = 0
@@ -226,16 +232,16 @@ def train():
 
         # inside while total_env_steps < cfg.total_steps:
         roll.clear()
-        frames = [] if cfg.record_rollouts else None
 
         for _ in range(cfg.rollout_len):
             ego_bna = ego_list_to_tchw(actor_obs).to(device)        # [A, C, k, k]
             glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)    # [1, C, H, W]
             agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
 
-            # policy for each agent
+            h_in = h_actor.detach()         # [A, H] keep what produced this step
+
             with torch.no_grad():
-                dists = model.actor(ego_bna, agent_ids)
+                dists, h_out = model.actor(ego_bna, agent_ids, h_in=h_in)  # <--- pass h
                 actions = dists.sample()
                 logprobs = dists.log_prob(actions)
 
@@ -257,6 +263,7 @@ def train():
                 v_b=v.detach(),
                 rew_b=torch.tensor(team_rew, dtype=torch.float32, device=device),
                 done_b=torch.tensor(float(terminated or truncated), device=device),
+                h_actor_in=h_in,                     # <--- NEW
             )
 
             # episode bookkeeping
@@ -268,6 +275,7 @@ def train():
             actor_obs, critic_obs = actor_obs_next, critic_obs_next
 
             if terminated or truncated:
+                h_actor = model.actor.init_hidden(n_agents, device)
                 (actor_obs, critic_obs), _ = env.reset()
                 ep_returns.append(ep_return)
                 ep_return = 0.0
@@ -305,6 +313,7 @@ def train():
 
         # ----- flatten per-agent items for actor updates -----
         B = roll.ptr
+        h_flat = roll.h_actor[:B].reshape(B * n_agents, hidden_dim)
         logp_flat = roll.logprobs[:B].reshape(B * n_agents)
         act_flat = roll.actions[:B].reshape(B * n_agents)
         agent_ids_flat = roll.agent_ids[:B].reshape(B * n_agents)
@@ -345,7 +354,11 @@ def train():
                     mask.extend(range(base, base + n_agents))
                 mask = torch.as_tensor(mask, dtype=torch.long, device=device)
 
-                dists_new = model.actor(ego_flat[mask].to(device), agent_ids_flat[mask].to(device))
+                dists_new, _ = model.actor(
+                    ego_flat[mask].to(device),
+                    agent_ids_flat[mask].to(device),
+                    h_in=h_flat[mask].to(device)           # <--- NEW
+                )
                 new_logp = dists_new.log_prob(act_flat[mask].to(device))
                 ratio = torch.exp(new_logp - old_logp_flat[mask])
                 adv_per_agent = adv_batch[mb].to(device).repeat_interleave(n_agents)
@@ -389,10 +402,11 @@ def train():
             }
             wandb.log(log_payload, step=total_env_steps)
             with torch.no_grad():
-                # dists was computed per-step during collection; here we can recompute on current obs:
-                d = model.actor(ego_list_to_tchw(actor_obs).to(device),
-                                torch.arange(n_agents, device=device))
-                probs = d.probs.detach().cpu().numpy()  # [A, 4]
+                ego_t = ego_list_to_tchw(actor_obs).to(device)
+                ids_t = torch.arange(n_agents, device=device)
+                out = model.actor(ego_t, ids_t)
+                d = out[0] if isinstance(out, tuple) else out   # handle GRU (tuple) or FF (dist)
+                probs = d.probs.detach().cpu().numpy()
                 # average over agents
                 wandb.log({
                     "policy/action_prob_right": probs[:,1].mean(),
@@ -410,16 +424,13 @@ def train():
             )
             print(eval_stats)
 
-
-
-
     print("Training complete.")
 
 
 @torch.no_grad()
 def run_eval_rollout(
-    env: MultiAgentGridWorld,
-    model: MAPPOModel,
+    env,
+    model,
     device: torch.device,
     *,
     deterministic: bool = True,
@@ -429,14 +440,28 @@ def run_eval_rollout(
     log_wandb: bool = False,
 ) -> dict:
     """
-    Run ONE evaluation episode (no gradient). Returns a dict of metrics.
-    If `record=True` and `gif_path` is provided, saves a video of the rollout.
+    Run ONE evaluation episode (no gradient). Compatible with FF or GRU actor.
+    If GRU is present, we pass/maintain h and set exploration eps=0 during eval.
     """
     model.actor.eval()
     model.critic.eval()
 
-    (actor_obs, critic_obs), info0 = env.reset()
+    (actor_obs, critic_obs), _ = env.reset()
     n_agents = env.cfg.n_agents
+
+    # --- GRU support: create hidden if the actor exposes it ---
+    has_gru = hasattr(model.actor, "init_hidden") and hasattr(model.actor, "hidden_dim")
+    if has_gru:
+        h = model.actor.init_hidden(n_agents, device)  # [A, H]
+    else:
+        h = None
+
+    # --- turn off epsilon mixing during eval (if available) ---
+    eps_restore = None
+    if hasattr(model.actor, "set_exploration_eps"):
+        # keep original to restore after eval
+        eps_restore = float(getattr(model.actor, "_eps_explore", 0.0))
+        model.actor.set_exploration_eps(0.0)
 
     # per-episode accumulators
     team_return = 0.0
@@ -444,53 +469,64 @@ def run_eval_rollout(
     steps = 0
     first_delivery_t = None
     deliveries = 0
-    object_move_steps = 0  # count how many steps any object moved
+    object_move_steps = 0
     last_obj_positions = None
 
-    # action distribution tracking (averaged over agents, then over time)
     probs_running_sum = np.zeros(4, dtype=np.float64)
     probs_count = 0
 
     frames = [] if record else None
 
     while True:
-        # Build inputs
-        ego_bna = ego_list_to_tchw(actor_obs).to(device)          # [A,C,k,k]
-        glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)      # [1,C,H,W]
+        ego_bna = ego_list_to_tchw(actor_obs).to(device)       # [A,C,k,k]
+        glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)   # [1,C,H,W]
         agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
 
-        # Policy forward
-        dists = model.actor(ego_bna, agent_ids)                   # Categorical
-        if deterministic:
-            actions = torch.argmax(dists.probs, dim=-1)           # [A]
+        # --- policy forward (FF or GRU) ---
+        if has_gru:
+            # Prefer explicit override if actor supports it; else eps is 0.0 already.
+            if "eps_override" in model.actor.forward.__code__.co_varnames:
+                dists, h = model.actor(ego_bna, agent_ids, h_in=h, eps_override=0.0)
+            else:
+                dists, h = model.actor(ego_bna, agent_ids, h_in=h)
         else:
-            actions = dists.sample()                              # [A]
+            out = model.actor(ego_bna, agent_ids)
+            if isinstance(out, tuple):
+                dists = out[0]
+            else:
+                dists = out
 
-        # Track action probabilities (mean over agents)
-        probs = dists.probs.detach().cpu().numpy()                # [A,4]
+        # choose actions
+        if deterministic:
+            actions = torch.argmax(dists.probs, dim=-1)        # [A]
+        else:
+            actions = dists.sample()
+
+        # track action probs
+        probs = dists.probs.detach().cpu().numpy()             # [A,4]
         probs_running_sum += probs.mean(axis=0)
         probs_count += 1
 
-        # Env step
+        # env step
         act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
         (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
 
-        # Record frame after step
+        # record frame
         if record:
             f = capture_frame(env)
             if f is not None:
                 frames.append(f)
 
-        # Accumulate returns
+        # returns
         team_return += float(team_rew)
         if "rewards_per_agent" in info and isinstance(info["rewards_per_agent"], (list, tuple)):
             per_agent_return += np.array(info["rewards_per_agent"], dtype=np.float64)
 
-        # Deliveries & object movement stats
+        # deliveries & object motion
         if "objects_delivered_new" in info:
             deliveries += int(info.get("objects_delivered_new", 0))
             if first_delivery_t is None and info.get("objects_delivered_total", 0) > 0:
-                first_delivery_t = steps + 1  # +1 because we just took a step
+                first_delivery_t = steps + 1
 
         if "object_pos_list" in info:
             cur_obj_positions = tuple(info["object_pos_list"])
@@ -501,18 +537,15 @@ def run_eval_rollout(
         steps += 1
         actor_obs, critic_obs = actor_obs_next, critic_obs_next
 
-        # Stop conditions
+        # stop
         if terminated or truncated:
             break
         if max_steps is not None and steps >= max_steps:
             break
 
-    # Episode summary
     term_reason = info.get("terminated_by", "unknown")
     success_full = (term_reason == "all_goals_and_objects")
     success_any_delivery = (info.get("objects_delivered_total", 0) > 0)
-
-    # Action probs averaged over the episode
     mean_action_probs = probs_running_sum / max(probs_count, 1)
 
     metrics = {
@@ -532,21 +565,23 @@ def run_eval_rollout(
         "eval/action_prob_left": float(mean_action_probs[3]),
     }
 
-    # Optional: write GIF
     if record and gif_path and frames:
         save_gif(frames, gif_path, fps=10)
         metrics["eval/gif_path"] = gif_path
 
-    # Optional: log to W&B as a single point
     if log_wandb:
-        # Termination reason as one-hot flags (helps dashboards)
         term_flags = {
             "eval/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
             "eval/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
             "eval/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
             "eval/term/other": 1.0 if term_reason not in ("time_limit", "catastrophe", "all_goals_and_objects") else 0.0,
         }
+        import wandb
         wandb.log({**metrics, **term_flags})
+
+    # restore training epsilon if we changed it
+    if eps_restore is not None and hasattr(model.actor, "set_exploration_eps"):
+        model.actor.set_exploration_eps(eps_restore)
 
     return metrics
 

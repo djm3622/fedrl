@@ -78,25 +78,59 @@ class GlobalEncoder(nn.Module):
 
 
 class ActorPolicy(nn.Module):
-    def __init__(self, n_actions: int = 4, ego_k: int = 5, n_agents: int = 3):
+    def __init__(self, n_actions: int = 4, ego_k: int = 5, n_agents: int = 3,
+                 hidden_dim: int = 128, eps_explore: float = 0.05):
         super().__init__()
         self.encoder = EgoEncoder(in_ch=7, k=ego_k, feat_dim=128, n_agents=n_agents)
-        self.pi = nn.Linear(128, n_actions)
+        self.gru = nn.GRUCell(input_size=128, hidden_size=hidden_dim)
+        self.pi = nn.Linear(hidden_dim, n_actions)
+        self.hidden_dim = hidden_dim
+        self._eps_explore = eps_explore  # default exploration epsilon
 
-    def forward(self, ego: torch.Tensor, agent_ids: torch.Tensor) -> torch.distributions.Categorical:
-        z = self.encoder(ego, agent_ids)
-        logits = self.pi(z)
-        return torch.distributions.Categorical(logits=logits)
+    @property
+    def eps_explore(self) -> float:
+        return self._eps_explore
+
+    def set_exploration_eps(self, eps: float):
+        self._eps_explore = float(eps)
+
+    def init_hidden(self, batch: int, device: torch.device) -> torch.Tensor:
+        # [B, hidden_dim]
+        return torch.zeros(batch, self.hidden_dim, device=device)
+
+    def forward(
+        self,
+        ego: torch.Tensor,            # [B, C, k, k]
+        agent_ids: torch.Tensor,      # [B]
+        h_in: Optional[torch.Tensor] = None,  # [B, hidden_dim]
+        eps_override: Optional[float] = None,
+    ) -> Tuple[torch.distributions.Categorical, torch.Tensor]:
+        z = self.encoder(ego, agent_ids)      # [B, 128]
+        if h_in is None:
+            h_in = torch.zeros(z.size(0), self.hidden_dim, device=z.device)
+        h_out = self.gru(z, h_in)             # [B, hidden_dim]
+        logits = self.pi(h_out)               # [B, A]
+
+        # --- ε-mixed exploration: p' = (1-ε) softmax + ε / A ---
+        eps = self._eps_explore if eps_override is None else eps_override
+        if eps > 0.0:
+            probs = torch.softmax(logits, dim=-1)
+            A = probs.size(-1)
+            probs = (1.0 - eps) * probs + eps / float(A)
+            dist = torch.distributions.Categorical(probs=probs)
+        else:
+            dist = torch.distributions.Categorical(logits=logits)
+
+        return dist, h_out
 
 
 class CentralCritic(nn.Module):
+    # unchanged
     def __init__(self):
         super().__init__()
         self.encoder = GlobalEncoder(in_ch=6, feat_dim=256)
         self.v = nn.Linear(256, 1)
-
     def forward(self, global_planes: torch.Tensor) -> torch.Tensor:
-        # returns scalar V(s)
         z = self.encoder(global_planes)
         v = self.v(z)
         return v.squeeze(-1)
@@ -108,6 +142,10 @@ class MAPPOModel:
     critic: CentralCritic
 
     @staticmethod
-    def build(n_actions: int = 4, ego_k: int = 5, n_agents: int = 3) -> "MAPPOModel":
-        return MAPPOModel(actor=ActorPolicy(n_actions=n_actions, ego_k=ego_k, n_agents=n_agents),
-                          critic=CentralCritic())
+    def build(n_actions: int = 4, ego_k: int = 5, n_agents: int = 3,
+              hidden_dim: int = 128, eps_explore: float = 0.05) -> "MAPPOModel":
+        return MAPPOModel(
+            actor=ActorPolicy(n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,
+                              hidden_dim=hidden_dim, eps_explore=eps_explore),
+            critic=CentralCritic()
+        )

@@ -222,7 +222,8 @@ class MultiAgentGridWorld:
         - actor_obs: list per agent (coords or k x k ego crop)
         - critic_obs: global (H, W, C) planes if enabled, else None
     """
-    ACTIONS: List[Coord] = [(-1, 0), (0, +1), (+1, 0), (0, -1)]
+    ACTIONS = [(-1,0),(0,+1),(+1,0),(0,-1),(0,0)]
+
 
     def __init__(self, cfg: MultiAgentGridConfig):
         cfg.validate()
@@ -383,7 +384,7 @@ class MultiAgentGridWorld:
                 continue
             a_eff = a
             if self.cfg.slip_prob > 0.0 and self.rng.uniform() < self.cfg.slip_prob:
-                a_eff = int(self.rng.integers(0, 4))
+                a_eff = int(self.rng.integers(0, 5))   # was 0..4
             a_eff_list[i] = a_eff
 
             dr, dc = MultiAgentGridWorld.ACTIONS[a_eff]
@@ -834,7 +835,7 @@ def make_aligned_client_cfg(
         block_on_collision=True,
         critic_obs_mode="grid",
         actor_obs_mode="ego",
-        ego_k=5,
+        ego_k=7,
         has_objects=True,
         object_starts=((6, 1), (2, 1), (5, 8)),  # 3 objects by default
         object_goal=(9, 5),
