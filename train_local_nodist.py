@@ -7,7 +7,7 @@ from __future__ import annotations
 import os
 import time
 from dataclasses import dataclass, asdict
-from typing import Tuple, List
+from typing import Tuple, List, Optional
 import imageio.v2 as imageio  # for GIF writing
 from utils.wandb_helper import (
     init_wandb, log_singular_value, log_losses, log_figure,
@@ -247,12 +247,6 @@ def train():
             act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
             (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
 
-            # capture frame AFTER the step so you see the result of the actions
-            if cfg.record_rollouts:
-                frame = capture_frame(env)
-                if frame is not None:
-                    frames.append(frame)
-
             # store
             roll.add(
                 ego_bna=ego_bna,
@@ -279,11 +273,16 @@ def train():
                 ep_return = 0.0
                 ep_len = 0
 
-                # also capture a frame at reset if available (optional)
-                if cfg.record_rollouts:
-                    frame = capture_frame(env)
-                    if frame is not None:
-                        frames.append(frame)
+                 # Build per-episode metrics from the final `info`
+                term_reason = info.get("terminated_by", "unknown")
+                wandb.log({
+                    "ep/len": ep_len,
+                    "ep/return_team": ep_return,
+                    "ep/objects_delivered_total": int(info.get("objects_delivered_total", 0)),
+                    "ep/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
+                    "ep/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
+                    "ep/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
+                }, step=total_env_steps)
 
             if roll.full():
                 break
@@ -380,13 +379,6 @@ def train():
 
         # logging + video dump
         # ----- logging + video dump -----
-        if total_env_steps - last_gif_dump >= cfg.gif_every_steps and cfg.gif_every_steps > 0:
-            if frames:  # only if we actually recorded
-                gif_path = os.path.join(gif_outdir, f"rollout_steps_{total_env_steps}.gif")
-                save_gif(frames, gif_path, fps=10)
-                print(f"[saved rollout video -> {gif_path}]", flush=True)
-            last_gif_dump = total_env_steps
-
         if total_env_steps % cfg.log_interval == 0:
             mean_ret = np.mean(ep_returns[-10:]) if ep_returns else 0.0
             log_payload = {
@@ -409,11 +401,154 @@ def train():
                     "policy/action_prob_left":  probs[:,3].mean(),
                 }, step=total_env_steps)
             print(f"steps={total_env_steps}  mean_ep_ret_10={mean_ret:.2f}  last_v={last_v.item():.2f}", flush=True)
+            eval_stats = run_eval_rollout(
+                env, model, device,
+                deterministic=True,
+                record=False,
+                log_wandb=True,                 # set True to push to W&B
+                gif_path="outputs/eval/eval_ep.gif"
+            )
+            print(eval_stats)
 
 
 
 
     print("Training complete.")
+
+
+@torch.no_grad()
+def run_eval_rollout(
+    env: MultiAgentGridWorld,
+    model: MAPPOModel,
+    device: torch.device,
+    *,
+    deterministic: bool = True,
+    max_steps: Optional[int] = None,
+    record: bool = False,
+    gif_path: Optional[str] = None,
+    log_wandb: bool = False,
+) -> dict:
+    """
+    Run ONE evaluation episode (no gradient). Returns a dict of metrics.
+    If `record=True` and `gif_path` is provided, saves a video of the rollout.
+    """
+    model.actor.eval()
+    model.critic.eval()
+
+    (actor_obs, critic_obs), info0 = env.reset()
+    n_agents = env.cfg.n_agents
+
+    # per-episode accumulators
+    team_return = 0.0
+    per_agent_return = np.zeros(n_agents, dtype=np.float64)
+    steps = 0
+    first_delivery_t = None
+    deliveries = 0
+    object_move_steps = 0  # count how many steps any object moved
+    last_obj_positions = None
+
+    # action distribution tracking (averaged over agents, then over time)
+    probs_running_sum = np.zeros(4, dtype=np.float64)
+    probs_count = 0
+
+    frames = [] if record else None
+
+    while True:
+        # Build inputs
+        ego_bna = ego_list_to_tchw(actor_obs).to(device)          # [A,C,k,k]
+        glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)      # [1,C,H,W]
+        agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
+
+        # Policy forward
+        dists = model.actor(ego_bna, agent_ids)                   # Categorical
+        if deterministic:
+            actions = torch.argmax(dists.probs, dim=-1)           # [A]
+        else:
+            actions = dists.sample()                              # [A]
+
+        # Track action probabilities (mean over agents)
+        probs = dists.probs.detach().cpu().numpy()                # [A,4]
+        probs_running_sum += probs.mean(axis=0)
+        probs_count += 1
+
+        # Env step
+        act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
+        (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
+
+        # Record frame after step
+        if record:
+            f = capture_frame(env)
+            if f is not None:
+                frames.append(f)
+
+        # Accumulate returns
+        team_return += float(team_rew)
+        if "rewards_per_agent" in info and isinstance(info["rewards_per_agent"], (list, tuple)):
+            per_agent_return += np.array(info["rewards_per_agent"], dtype=np.float64)
+
+        # Deliveries & object movement stats
+        if "objects_delivered_new" in info:
+            deliveries += int(info.get("objects_delivered_new", 0))
+            if first_delivery_t is None and info.get("objects_delivered_total", 0) > 0:
+                first_delivery_t = steps + 1  # +1 because we just took a step
+
+        if "object_pos_list" in info:
+            cur_obj_positions = tuple(info["object_pos_list"])
+            if last_obj_positions is not None and cur_obj_positions != last_obj_positions:
+                object_move_steps += 1
+            last_obj_positions = cur_obj_positions
+
+        steps += 1
+        actor_obs, critic_obs = actor_obs_next, critic_obs_next
+
+        # Stop conditions
+        if terminated or truncated:
+            break
+        if max_steps is not None and steps >= max_steps:
+            break
+
+    # Episode summary
+    term_reason = info.get("terminated_by", "unknown")
+    success_full = (term_reason == "all_goals_and_objects")
+    success_any_delivery = (info.get("objects_delivered_total", 0) > 0)
+
+    # Action probs averaged over the episode
+    mean_action_probs = probs_running_sum / max(probs_count, 1)
+
+    metrics = {
+        "eval/steps": steps,
+        "eval/team_return": float(team_return),
+        "eval/per_agent_return_mean": float(per_agent_return.mean()),
+        "eval/per_agent_return_sum": per_agent_return.tolist(),
+        "eval/objects_delivered_total": int(info.get("objects_delivered_total", deliveries)),
+        "eval/objects_delivered_first_t": int(first_delivery_t) if first_delivery_t is not None else -1,
+        "eval/object_move_steps": int(object_move_steps),
+        "eval/terminated_by": term_reason,
+        "eval/success_full_completion": bool(success_full),
+        "eval/success_any_delivery": bool(success_any_delivery),
+        "eval/action_prob_up": float(mean_action_probs[0]),
+        "eval/action_prob_right": float(mean_action_probs[1]),
+        "eval/action_prob_down": float(mean_action_probs[2]),
+        "eval/action_prob_left": float(mean_action_probs[3]),
+    }
+
+    # Optional: write GIF
+    if record and gif_path and frames:
+        save_gif(frames, gif_path, fps=10)
+        metrics["eval/gif_path"] = gif_path
+
+    # Optional: log to W&B as a single point
+    if log_wandb:
+        # Termination reason as one-hot flags (helps dashboards)
+        term_flags = {
+            "eval/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
+            "eval/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
+            "eval/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
+            "eval/term/other": 1.0 if term_reason not in ("time_limit", "catastrophe", "all_goals_and_objects") else 0.0,
+        }
+        wandb.log({**metrics, **term_flags})
+
+    return metrics
 
 
 if __name__ == "__main__":
