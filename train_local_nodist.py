@@ -403,8 +403,8 @@ def train():
             print(f"steps={total_env_steps}  mean_ep_ret_10={mean_ret:.2f}  last_v={last_v.item():.2f}", flush=True)
             eval_stats = run_eval_rollout(
                 env, model, device,
-                deterministic=True,
-                record=False,
+                deterministic=False,
+                record=True,
                 log_wandb=True,                 # set True to push to W&B
                 gif_path="outputs/eval/eval_ep.gif"
             )
