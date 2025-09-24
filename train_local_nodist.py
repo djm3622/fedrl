@@ -8,7 +8,7 @@ import os
 import time
 from dataclasses import dataclass, asdict
 from typing import Tuple, List, Optional
-import imageio.v2 as imageio  # for GIF writing
+import imageio.v2 as imageio  # pyright: ignore[reportMissingImports] # for GIF writing
 from utils.wandb_helper import (
     init_wandb, log_singular_value, log_losses, log_figure,
     log_table, save_model_architecture, finish_run
@@ -60,7 +60,7 @@ def save_gif(frames, path, fps=10):
 @dataclass
 class TrainCfg:
     device = pick_device()
-    total_steps: int = 100_000_000
+    total_steps: int = 5_000_000
     rollout_len: int = 512
     update_epochs: int = 4
     minibatches: int = 4
@@ -77,7 +77,7 @@ class TrainCfg:
 
     # --- NEW: W&B ---
     wandb_project: str = "mappo-gridworld"
-    wandb_run_name: str = "case_study_1_2"
+    wandb_run_name: str = "case_study_1_2_cat"
     wandb_mode: str = "online"   # "offline" or "disabled" if you want local only
     log_video: bool = False      # guard for heavy media logging
 
@@ -312,8 +312,6 @@ def train():
         total_v_loss = 0.0
         total_policy_loss = 0.0
         total_entropy = 0.0
-        total_clip_frac = 0.0
-        total_approx_kl = 0.0
         n_mb = 0
 
         # ----- flatten per-agent items for actor updates -----
@@ -600,4 +598,3 @@ def run_eval_rollout(
 if __name__ == "__main__":
     train()
     finish_run()
-

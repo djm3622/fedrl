@@ -59,7 +59,7 @@ class MultiAgentGridConfig:
     # MARL and dynamics
     n_agents: int = 3
     slip_prob: float = 0.05
-    sample_active_hazard_each_episode: bool = True
+    sample_active_hazard_each_episode: bool = False
     block_on_collision: bool = True
 
     # Observations
@@ -241,6 +241,10 @@ class MultiAgentGridWorld:
         self._obj_pos_list: List[Coord] = list(cfg.object_starts) if cfg.has_objects else []
         self._obj_delivered: List[bool] = [False] * len(self._obj_pos_list) if self.cfg.has_objects else []
 
+        # --- NEW: choose a fixed active hazard once at construction if we're not resampling per episode ---
+        if self._hazard_cells_all and not cfg.sample_active_hazard_each_episode:
+            self._sample_active_hazard_cell()
+
 
     # ---------------- helpers ----------------
     def in_bounds(self, rc: Coord) -> bool:
@@ -357,8 +361,13 @@ class MultiAgentGridWorld:
         self._obj_pos_list = list(self.cfg.object_starts) if self.cfg.has_objects else []
         self._obj_delivered = [False] * len(self._obj_pos_list) if self.cfg.has_objects else []
 
+        # If you want the hazard fixed: keep sample_active_hazard_each_episode=False.
+        # If True, we resample every episode. If False and none picked yet, pick once now.
         if self.cfg.sample_active_hazard_each_episode:
             self._sample_active_hazard_cell()
+        elif self._hazard_active is None and self._hazard_cells_all:
+            self._sample_active_hazard_cell()
+
         return self._get_obs(), {"t": self._t, "hazard_active": self._hazard_active}
 
     def step(self, actions: Union[List[int], Dict[int, int]]):
@@ -853,7 +862,7 @@ def make_aligned_client_cfg(
         invalid_move_penalty=-0.1,
         max_steps=120,
         n_agents=n_agents,
-        slip_prob=0.00,
+        slip_prob=0.05,
         sample_active_hazard_each_episode=False,
         block_on_collision=True,
         critic_obs_mode="grid",
