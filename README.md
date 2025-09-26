@@ -3,7 +3,7 @@
 Sweden project.
 
 ## TODO
-1. update todo
+1. Fix environment. It broke a bit. I think because of the configuration fill inst.
 
 ## Case Study 1.1
 This case study looks at a federated DRL bandit problem.
