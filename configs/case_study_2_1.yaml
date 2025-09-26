@@ -1,0 +1,69 @@
+train:
+  device: "cpu"         
+  total_steps: 1000
+  rollout_len: 512
+  update_epochs: 4
+  minibatches: 4
+  gamma: 0.99
+  gae_lambda: 0.95
+  clip_eps: 0.2
+  vf_coef: 0.5
+  ent_coef: 0.02
+  lr: 1e-4
+  max_grad_norm: 0.5
+  seed: 42
+  log_interval: 1000      
+  eval_every_steps: 100000
+
+  wandb_project: "mappo-gridworld"
+  wandb_run_name: "case_study_1_2_cat"
+  wandb_mode: "online"    
+  log_video: false           
+
+env:
+  H: 10
+  W: 10
+
+  starts: [[9, 0], [0, 0], [9, 9]]
+  goals: [[0, 5]]
+
+  obstacle_template_id: "WarehouseA"
+  obstacles: []
+
+  hazard_zone_bounds: [2, 6, 4, 8]
+  hazard_zone_cells: null
+
+  hazard_prob: 0.20
+  hazard_loss: 120.0
+
+  step_cost: -0.1
+  goal_reward: 100.0
+  catastrophe_reward: -120.0
+
+  invalid_move_penalty: -0.1
+  max_steps: 120
+
+  n_agents: 3
+  slip_prob: 0.05
+  sample_active_hazard_each_episode: false
+  block_on_collision: true
+
+  critic_obs_mode: "grid"
+  actor_obs_mode: "ego"
+  ego_k: 5
+
+  has_objects: true
+  object_starts: [[6, 2], [6, 3], [6, 4]]
+  object_goal: [9, 5]
+  require_two_pushers: false
+  object_push_penalty: 0.05
+  object_reward: 300.0
+
+  use_push_step_cost: true
+  push_step_cost: 0.0
+  push_fail_penalty: 0.0
+
+  allow_multi_agent_on_goal: true
+  allow_objects_stack_on_object_goal: true
+
+  seed: 42

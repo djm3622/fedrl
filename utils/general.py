@@ -1,15 +1,19 @@
 import os
 import random
-from typing import List, get_origin, get_args
+from typing import List, get_origin, get_args, Dict, Type
 import yaml
 from pathlib import Path
 from configs.config_templates.case_study_1_1 import Config
-
+from configs.config_templates.case_study_2_1 import MultiAgentGridConfig
 import numpy as np
-
 import torch
-
 from dataclasses import fields
+import imageio.v2 as imageio  # pyright: ignore[reportMissingImports] # for GIF writing
+
+CONFIGS: Dict[str, Type] = {
+    "case_1": Config,
+    "case_2": MultiAgentGridConfig,
+}
 
 def set_seed(seed: int = 1337):
     random.seed(seed)
@@ -113,7 +117,7 @@ def _cast_list(xs, elem_t):
     return [ _cast_scalar(x, elem_t) for x in xs ]
 
 
-def load_config(path: str) -> Config:
+def load_config(path: str, config_type: str):
     with open(path, "r") as f:
         raw = yaml.safe_load(f) or {}
 
@@ -125,7 +129,8 @@ def load_config(path: str) -> Config:
 
     # cast by dataclass annotations
     kwargs = {}
-    for f in fields(Config):
+    c = CONFIGS.get(config_type, None)
+    for f in fields(c):
         if f.name in flat:
             tgt = f.type
             val = flat[f.name]
@@ -135,7 +140,8 @@ def load_config(path: str) -> Config:
                 kwargs[f.name] = _cast_list(val, elem_t)
             else:
                 kwargs[f.name] = _cast_scalar(val, tgt)
-    return Config(**kwargs)
+
+    return c(**kwargs)
 
 
 def _ensure_dir(p: Path) -> None:
@@ -143,10 +149,35 @@ def _ensure_dir(p: Path) -> None:
 
 
 def pick_device() -> torch.device:
-    # Apple Silicon GPU (Metal)
     if hasattr(torch.backends, "mps") and torch.backends.mps.is_available() and torch.backends.mps.is_built():
         return torch.device("mps")
-    # NVIDIA CUDA (Linux/Windows, not macOS)
     if torch.cuda.is_available():
         return torch.device("cuda")
     return torch.device("cpu")
+
+
+def capture_frame(env):
+    try:
+        frame = env.render(mode="rgb_array")
+        if isinstance(frame, np.ndarray):
+            return frame
+    except Exception:
+        pass
+    try:
+        frame = env.render(return_rgb_array=True)
+        if isinstance(frame, np.ndarray):
+            return frame
+    except Exception:
+        pass
+    try:
+        frame = env.render()
+        if isinstance(frame, np.ndarray):
+            return frame
+    except Exception:
+        pass
+    return None
+
+
+def save_gif(frames, path, fps=10):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    imageio.mimsave(path, frames, duration=1.0/max(fps,1))

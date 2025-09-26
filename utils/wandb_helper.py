@@ -74,3 +74,10 @@ def save_model_architecture(
     
 def finish_run():
     wandb.finish()
+
+
+def log_artifact(file_path: str, name: str, type: str = "file"):
+    """Log a local file to W&B as an artifact"""
+    artifact = wandb.Artifact(name=name, type=type)
+    artifact.add_file(file_path)
+    wandb.log_artifact(artifact)

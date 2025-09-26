@@ -1,19 +1,11 @@
-# models/mappo_nets.py
-# Minimal MAPPO actor and centralized critic for your gridworld.
-# Actor consumes ego crops (k x k x 7). Critic consumes global planes (H x W x 6).
-# Comments use only ascii characters.
-
-from __future__ import annotations
 from dataclasses import dataclass
 from typing import Tuple, Optional
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 def conv_out_hw(h: int, w: int, k: int = 3, s: int = 1, p: int = 1) -> Tuple[int, int]:
-    # for conv2d with kernel k, stride s, padding p
     oh = (h + 2 * p - k) // s + 1
     ow = (w + 2 * p - k) // s + 1
     return oh, ow
@@ -111,7 +103,6 @@ class ActorPolicy(nn.Module):
         h_out = self.gru(z, h_in)             # [B, hidden_dim]
         logits = self.pi(h_out)               # [B, A]
 
-        # --- ε-mixed exploration: p' = (1-ε) softmax + ε / A ---
         eps = self._eps_explore if eps_override is None else eps_override
         if eps > 0.0:
             probs = torch.softmax(logits, dim=-1)
@@ -125,7 +116,6 @@ class ActorPolicy(nn.Module):
 
 
 class CentralCritic(nn.Module):
-    # unchanged
     def __init__(self):
         super().__init__()
         self.encoder = GlobalEncoder(in_ch=6, feat_dim=256)

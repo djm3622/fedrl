@@ -16,7 +16,7 @@ methods = ['local', 'fedavg', 'fedtrunc', 'fedrl']
 
 
 def main(config_path: str):
-    cfg = load_config(config_path)
+    cfg = load_config(config_path, config_type='case_1')
 
     all_summaries = []
 
@@ -29,7 +29,6 @@ def main(config_path: str):
 
         for method in methods:
             print(f"Running Method: {method}")
-            #try:
             if method == 'local':
                 summary = train_local(env, cfg, summary)
             elif method == 'fedavg':
@@ -38,8 +37,6 @@ def main(config_path: str):
                 summary = train_fedtrunc(env, cfg, summary)
             elif method == 'fedrl':
                 summary = train_fedrl(env, cfg, summary)
-            #except Exception as e:
-                #print(f"  Error running {method} with seed {seed}: {e}")
 
         all_summaries.append(summary)
 
