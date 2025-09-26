@@ -1,6 +1,6 @@
 train:
-  device: "cpu"         
-  total_steps: 1000
+  device: "cuda"         
+  total_steps: 5000000
   rollout_len: 512
   update_epochs: 4
   minibatches: 4
@@ -16,7 +16,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_cat"
+  wandb_run_name: "case_study_1_2_v0"
   wandb_mode: "online"    
   log_video: false           
 

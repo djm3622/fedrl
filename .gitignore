@@ -2,6 +2,7 @@ outputs/
 plots/
 std_out/
 wandb/
+artifacts/
 
 test.ipynb
 batch_train.sh
