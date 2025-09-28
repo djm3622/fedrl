@@ -1,11 +1,10 @@
-from typing import Dict, Optional, Tuple, List, Sequence, Union
+from typing import Dict, Optional, Tuple, List, Union
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 import matplotlib.patches as mpatches
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
 from configs.config_templates.case_study_2_1 import MultiAgentGridConfig, Coord
-from utils.general import set_seed
 
 
 class MultiAgentGridWorld:
@@ -382,7 +381,7 @@ class MultiAgentGridWorld:
             r, c = self._hazard_active
             grid[r, c] = 3
 
-        # object goal then object
+        # object goal then objects
         if self.cfg.has_objects and self.cfg.object_goal is not None:
             gr, gc = self.cfg.object_goal
             grid[gr, gc] = 6
@@ -395,7 +394,7 @@ class MultiAgentGridWorld:
         for gr, gc in goals:
             grid[gr, gc] = 4
 
-        # agents
+        # agents (draw last)
         for (r, c) in self._pos:
             grid[r, c] = 5
 
@@ -406,8 +405,19 @@ class MultiAgentGridWorld:
         bounds = [0,1,2,3,4,5,6,7,8]
         norm = mcolors.BoundaryNorm(bounds, cmap.N)
 
-        fig, ax = plt.subplots()
-        ax.imshow(grid, cmap=cmap, norm=norm)
+        # ---- Figure with a dedicated legend column (no overlay, no cropping) ----
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
+
+        # Wider figure: left 4/5 for map, right 1/5 for legend
+        fig = plt.figure(figsize=(7.5, 6.0), dpi=120)  # keep size fixed for GIF stability
+        gs = fig.add_gridspec(1, 2, width_ratios=[4, 1])
+
+        ax = fig.add_subplot(gs[0, 0])
+        ax_leg = fig.add_subplot(gs[0, 1])
+        ax_leg.axis("off")  # legend-only pane
+
+        im = ax.imshow(grid, cmap=cmap, norm=norm)
         ax.set_xticks(np.arange(-.5, W, 1), minor=True)
         ax.set_yticks(np.arange(-.5, H, 1), minor=True)
         ax.grid(which="minor", color="gray", linestyle='-', linewidth=0.5)
@@ -415,21 +425,21 @@ class MultiAgentGridWorld:
                     labelbottom=False, labelleft=False)
 
         legend_patches = [
-            mpatches.Patch(color="white", label="Empty"),
-            mpatches.Patch(color="black", label="Obstacle"),
+            mpatches.Patch(color="white",  label="Empty"),
+            mpatches.Patch(color="black",  label="Obstacle"),
             mpatches.Patch(color="salmon", label="Hazard zone"),
-            mpatches.Patch(color="red", label="Active hazard"),
-            mpatches.Patch(color="green", label="Agent goal"),
-            mpatches.Patch(color="blue", label="Agent"),
-            mpatches.Patch(color="gold", label="Object goal"),
+            mpatches.Patch(color="red",    label="Active hazard"),
+            mpatches.Patch(color="green",  label="Agent goal"),
+            mpatches.Patch(color="blue",   label="Agent"),
+            mpatches.Patch(color="gold",   label="Object goal"),
             mpatches.Patch(color="purple", label="Object"),
         ]
-        ax.legend(handles=legend_patches, bbox_to_anchor=(1.05, 1), loc="upper left")
+        # Legend *inside its own axes*; nothing hangs outside the canvas
+        ax_leg.legend(handles=legend_patches, loc="center left", frameon=True)
 
         if mode == "human":
             plt.show()
             return None
-
         elif mode == "rgb_array":
             canvas = FigureCanvas(fig)
             canvas.draw()
@@ -438,10 +448,11 @@ class MultiAgentGridWorld:
             img = buf.reshape(h, w, 3).copy()
             plt.close(fig)
             return img
-
         else:
             plt.close(fig)
             raise NotImplementedError(f"Unknown render mode: {mode}")
+
+
 
     def render_agent_views(self):
         actor_obs, _ = self._get_obs()

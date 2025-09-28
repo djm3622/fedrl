@@ -211,16 +211,15 @@ def train(cfg, env, model, device):
 
 
         if total_env_steps >= next_eval:
-            eval_gif = f"outputs/eval/eval_ep_{total_env_steps}.gif"
-            eval_stats = run_eval_rollout(
+            eval_gif = f"outputs/eval/seed_{cfg.seed}_step_{total_env_steps}.gif"
+            _ = run_eval_rollout(
                 env, model, device,
                 deterministic=False,
                 record=True,
                 log_wandb=True,
                 gif_path=eval_gif,
-                wb_step=total_env_steps,      # <--- new arg
+                wb_step=total_env_steps,
             )
-            print(f"[eval] step={total_env_steps}  saved={eval_stats.get('eval/gif_path', 'None')}")
             next_eval += cfg.eval_every_steps
 
     return model

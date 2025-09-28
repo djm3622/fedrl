@@ -137,7 +137,6 @@ def run_eval_rollout(
 
     while True:
         ego_bna = ego_list_to_tchw(actor_obs).to(device)       # [A,C,k,k]
-        glob_b = to_tchw(critic_obs).unsqueeze(0).to(device)   # [1,C,H,W]
         agent_ids = torch.arange(n_agents, dtype=torch.long, device=device)
 
         # Policy forward (FF or GRU)
@@ -191,7 +190,7 @@ def run_eval_rollout(
             last_obj_positions = cur_obj_positions
 
         steps += 1
-        actor_obs, critic_obs = actor_obs_next, critic_obs_next
+        actor_obs, _ = actor_obs_next, critic_obs_next
 
         # Stop
         if terminated or truncated:
@@ -200,8 +199,6 @@ def run_eval_rollout(
             break
 
     term_reason = info.get("terminated_by", "unknown")
-    success_full = (term_reason == "all_goals_and_objects")
-    success_any_delivery = (info.get("objects_delivered_total", 0) > 0)
     mean_action_probs = (probs_running_sum / max(probs_count, 1)) if probs_running_sum is not None else np.zeros(4)
 
     # Base metrics
@@ -209,7 +206,6 @@ def run_eval_rollout(
         "eval/steps": steps,
         "eval/team_return": float(team_return),
         "eval/per_agent_return_mean": float(per_agent_return.mean()),
-        "eval/per_agent_return_sum": per_agent_return.tolist(),
         "eval/objects_delivered_total": int(info.get("objects_delivered_total", deliveries)),
         "eval/objects_delivered_first_t": int(first_delivery_t) if first_delivery_t is not None else -1,
         "eval/object_move_steps": int(object_move_steps),
@@ -225,9 +221,8 @@ def run_eval_rollout(
         os.makedirs(os.path.dirname(gif_path), exist_ok=True)
         try:
             save_gif(frames, gif_path, fps=10)
-            metrics["eval/gif_path"] = gif_path
         except Exception as e:
-            metrics["eval/gif_error"] = str(e)
+            print(f"WARNING: failed to save eval GIF to {gif_path}: {e}")
 
     # Log to W&B (metrics + video)
     if log_wandb:
@@ -238,11 +233,14 @@ def run_eval_rollout(
             "eval/term/other": 1.0 if term_reason not in ("time_limit", "catastrophe", "all_goals_and_objects") else 0.0,
         }
         wandb.log({**metrics, **term_flags}, step=wb_step)
-        if record and gif_path and os.path.exists(gif_path):
-            try:
-                wandb.log({"eval/gif": wandb.Video(gif_path, fps=10, format="gif")}, step=wb_step)
-            except Exception as e:
-                wandb.log({"eval/gif_upload_error": str(e)}, step=wb_step)
+        try:
+            art = wandb.Artifact("eval_gifs", type="evaluation")
+            # store under your chosen name
+            desired_name = os.path.basename(gif_path)
+            art.add_file(gif_path, name=desired_name)
+            wandb.log_artifact(art)
+        except Exception as e:
+            wandb.log({"eval/gif_artifact_error": str(e)}, step=wb_step)
 
     # Restore exploration epsilon
     if eps_restore is not None and hasattr(model.actor, "set_exploration_eps"):

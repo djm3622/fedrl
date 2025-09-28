@@ -1,5 +1,5 @@
 train:
-  device: "cuda"         
+  device: "mps"
   total_steps: 5000000
   rollout_len: 512
   update_epochs: 4
@@ -9,16 +9,16 @@ train:
   clip_eps: 0.2
   vf_coef: 0.5
   ent_coef: 0.02
-  lr: 1e-4
+  lr: 0.0001
   max_grad_norm: 0.5
-  seed: 42
-  log_interval: 1000      
-  eval_every_steps: 100000
+  seed: 0
+  log_interval: 1000
+  eval_every_steps: 512
 
   wandb_project: "mappo-gridworld"
   wandb_run_name: "case_study_1_2_v0"
-  wandb_mode: "online"    
-  log_video: false           
+  wandb_mode: "online"
+  log_video: false
 
 env:
   H: 10
@@ -27,10 +27,11 @@ env:
   starts: [[9, 0], [0, 0], [9, 9]]
   goals: [[0, 5]]
 
-  obstacle_template_id: "WarehouseA"
+  obstacle_template_id: "warehouse_a"
   obstacles: []
 
-  hazard_zone_bounds: [2, 6, 4, 8]
+  # 3x2 hazard centered: rows 4..6, cols 4..5 (inclusive)
+  hazard_zone_bounds: [3, 4, 5, 5]
   hazard_zone_cells: null
 
   hazard_prob: 0.20
@@ -53,7 +54,7 @@ env:
   ego_k: 5
 
   has_objects: true
-  object_starts: [[6, 2], [6, 3], [6, 4]]
+  object_starts: [[3, 2], [4, 2], [4, 7]]
   object_goal: [9, 5]
   require_two_pushers: false
   object_push_penalty: 0.05
@@ -65,5 +66,3 @@ env:
 
   allow_multi_agent_on_goal: true
   allow_objects_stack_on_object_goal: true
-
-  seed: 42
