@@ -13,7 +13,7 @@ train:
   max_grad_norm: 0.5
   seed: 0
   log_interval: 1000
-  eval_every_steps: 512
+  eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
   wandb_run_name: "case_study_1_2_v0"
