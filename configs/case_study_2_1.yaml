@@ -1,6 +1,6 @@
 train:
   device: "cuda"
-  total_steps: 4000000
+  total_steps: 6000000
   rollout_len: 512
   update_epochs: 4
   minibatches: 4

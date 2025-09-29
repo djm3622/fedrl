@@ -253,21 +253,17 @@ def run_eval_rollout(
 
 def quantile_huber_loss(pred: torch.Tensor, target: torch.Tensor, taus: torch.Tensor, kappa: float = 1.0) -> torch.Tensor:
     """
-    pred:   [B, N] predicted quantiles (per fixed taus)
-    target: [B, N] target samples at same quantile positions
-    taus:   [N]    fixed quantile levels in (0,1)
-
-    Returns scalar loss (mean over batch and quantiles).
+    pred:   [B, N]   predicted quantiles theta_i
+    target: [B, M]   target samples z'_j (e.g., next-state quantiles)
+    taus:   [N]      tau_i in (0,1)
     """
-    # pairwise TD errors at corresponding quantiles
-    u = target.detach() - pred  # [B, N]
+    u = target.unsqueeze(1) - pred.unsqueeze(2)      # [B, N, M]
     abs_u = u.abs()
-    # Huber
-    huber = torch.where(abs_u <= kappa, 0.5 * u.pow(2), kappa * (abs_u - 0.5 * kappa))
-    # Asymmetric quantile weighting
-    tau = taus.view(1, -1)  # [1, N]
-    loss = torch.where(u < 0.0, (1.0 - tau) * huber, tau * huber)
-    return loss.mean()
+    huber = torch.where(abs_u <= kappa, 0.5 * (u ** 2), kappa * (abs_u - 0.5 * kappa))
+    tau = taus.view(1, -1, 1)                        # [1, N, 1]
+    weight = torch.abs(tau - (u < 0).float())        # |tau - 1_{u<0}|
+    return (weight * huber).mean()
+
 
 
 @torch.no_grad()

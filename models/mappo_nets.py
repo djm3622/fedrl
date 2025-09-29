@@ -3,6 +3,7 @@ from typing import Tuple, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import math
 
 
 def conv_out_hw(h: int, w: int, k: int = 3, s: int = 1, p: int = 1) -> Tuple[int, int]:
@@ -70,7 +71,7 @@ class GlobalEncoder(nn.Module):
 
 
 class ActorPolicy(nn.Module):
-    def __init__(self, n_actions: int = 4, ego_k: int = 5, n_agents: int = 3,
+    def __init__(self, n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
                  hidden_dim: int = 128, eps_explore: float = 0.05):
         super().__init__()
         self.encoder = EgoEncoder(in_ch=7, k=ego_k, feat_dim=128, n_agents=n_agents)
@@ -133,28 +134,35 @@ class CentralCritic(nn.Module):
 
 
 class DistValueCritic(nn.Module):
-    """
-    Centralized distributional state-value critic (QR).
-    Predicts N fixed quantiles of Z(s). Mean across quantiles is V(s).
-    """
-    def __init__(self, in_ch: int = 6, feat_dim: int = 256, n_quantiles: int = 51):
+    def __init__(self, in_ch: int = 6, feat_dim: int = 256, n_quantiles: int = 51,
+                 v_min: float = -144.0, v_max: float = 1200.0, squash_temp: float = 10.0):
         super().__init__()
         self.encoder = GlobalEncoder(in_ch=in_ch, feat_dim=feat_dim)
         self.n_quantiles = n_quantiles
-        # fixed taus: midpoints of [0,1]
         taus = (torch.arange(n_quantiles, dtype=torch.float32) + 0.5) / n_quantiles
-        self.register_buffer("taus", taus)  # [N]
+        self.register_buffer("taus", taus)
+        self.v_min = float(v_min)
+        self.v_max = float(v_max)
+        self.squash_temp = float(squash_temp)
+
         self.head = nn.Linear(feat_dim, n_quantiles)
+        nn.init.zeros_(self.head.weight)
+
+        # Set initial mean of Z(s) to target_mean (0.0 recommended)
+        target_mean = 0.0
+        c = 0.5 * (self.v_max + self.v_min)
+        h = 0.5 * (self.v_max - self.v_min)
+        y = (target_mean - c) / max(h, 1e-6)
+        y = float(max(-0.999, min(0.999, y)))           # numerical safety
+        bias0 = self.squash_temp * math.atanh(y)        # invert the tanh mapping
+        nn.init.constant_(self.head.bias, bias0)
 
     def forward(self, global_planes: torch.Tensor) -> torch.Tensor:
-        """
-        Args:
-            global_planes: [B, C, H, W]
-        Returns:
-            quantiles: [B, N] predicted sample points of Z(s)
-        """
-        z = self.encoder(global_planes)        # [B, feat_dim]
-        q = self.head(z)                       # [B, N]
+        z = self.encoder(global_planes)
+        q = self.head(z)                                   # [B, N]
+        c = 0.5 * (self.v_max + self.v_min)
+        h = 0.5 * (self.v_max - self.v_min)
+        q = c + h * torch.tanh(q / self.squash_temp)       # map to [v_min, v_max]
         return q
 
     @torch.no_grad()
@@ -167,7 +175,6 @@ class DistValueCritic(nn.Module):
         return q.mean(dim=-1)
 
 
-
 @dataclass
 class MAPPOModel:
     actor: ActorPolicy
@@ -177,7 +184,7 @@ class MAPPOModel:
     def build(
         n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
         hidden_dim: int = 128, eps_explore: float = 0.05,
-        critic_type: str = "expected", n_quantiles: int = 51
+        critic_type: str = "expected", n_quantiles: int = 21
     ) -> "MAPPOModel":
         actor = ActorPolicy(
             n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,
