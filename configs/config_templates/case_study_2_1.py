@@ -97,8 +97,8 @@ class MultiAgentGridConfig:
     allow_multi_agent_on_goal: bool = True
     allow_objects_stack_on_object_goal: bool = True
 
-    # rng (duplicated seed kept for backward compat)
-    seed2: Optional[int] = None  # unused; keep your original `seed` above
+    # Distributional RL options
+    param_type: Literal["expected", "distributional"] = "expected"
 
     # ----------------- helpers -----------------
     def _nearest_free_noncorner(

@@ -10,10 +10,12 @@ import torch
 from dataclasses import fields
 import imageio.v2 as imageio  # pyright: ignore[reportMissingImports] # for GIF writing
 
+
 CONFIGS: Dict[str, Type] = {
     "case_1": Config,
     "case_2": MultiAgentGridConfig,
 }
+
 
 def set_seed(seed: int = 1337):
     random.seed(seed)
@@ -144,7 +146,9 @@ def load_config(path: str, config_type: str):
     return c(**kwargs)
 
 
-def _ensure_dir(p: Path) -> None:
+def _ensure_dir(p) -> None:
+    if not isinstance(p, Path):
+        p = Path(p)
     p.mkdir(parents=True, exist_ok=True)
 
 

@@ -16,9 +16,11 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_v0"
+  wandb_run_name: "case_study_1_2_distributional_v0"
   wandb_mode: "online"
   log_video: false
+
+  param_type: "distributional"
 
 env:
   H: 10

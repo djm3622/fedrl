@@ -1,10 +1,12 @@
 import torch
-from typing import Tuple, List
+from typing import Tuple, List, Optional, Dict
 import numpy as np
 from typing import Optional
-from utils.general import capture_frame, save_gif
+from utils.general import capture_frame, save_gif, _ensure_dir
 import wandb
 import os
+import matplotlib.pyplot as plt
+
 
 class RolloutBuffer:
     def __init__(
@@ -266,3 +268,178 @@ def quantile_huber_loss(pred: torch.Tensor, target: torch.Tensor, taus: torch.Te
     tau = taus.view(1, -1)  # [1, N]
     loss = torch.where(u < 0.0, (1.0 - tau) * huber, tau * huber)
     return loss.mean()
+
+
+@torch.no_grad()
+def dist_critic_diagnostics(
+    z: torch.Tensor,             # [B, N] quantiles from critic(glob_batch)
+    taus: torch.Tensor,          # [N]
+) -> Dict[str, float]:
+    """
+    Returns scalar diagnostics computed from z.
+    Assumes z is NOT necessarily sorted; will sort for stats only (no grads).
+    """
+    # sort along quantile axis to make the function monotone for reporting
+    z_sorted, _ = torch.sort(z, dim=-1)
+    # batch mean across states of each quantile
+    z_mean = z_sorted.mean(dim=0)                   # [N]
+    # percentiles over states at each tau for ribbon
+    z_q25 = z_sorted.quantile(0.25, dim=0)
+    z_q75 = z_sorted.quantile(0.75, dim=0)
+
+    # aggregate scalar moments on the induced distribution per state, then mean
+    v_mean = z_sorted.mean(dim=-1)                  # [B]
+    v_std = z_sorted.std(dim=-1, unbiased=False)    # [B]
+
+    def interp_at(p: float) -> torch.Tensor:
+        """
+        Linear interpolation of the batch of quantile functions at probability p in (0,1).
+        Returns a tensor of shape [B].
+        """
+        z_sorted_local = z_sorted  # [B, N]
+        nq = taus.numel()
+
+        # fractional position along the quantile axis
+        pos = p * (nq - 1)
+
+        # make it a tensor on the correct device/dtype, then clamp
+        pos_t = torch.tensor(pos, dtype=z_sorted_local.dtype, device=z_sorted_local.device)
+        pos_t = torch.clamp(pos_t, 0.0, float(nq - 1))
+
+        # integer neighbors and linear weight
+        lo = pos_t.floor().long()                         # 0D long tensor
+        hi = torch.clamp(lo + 1, max=nq - 1)              # 0D long tensor
+        w = (pos_t - lo.to(z_sorted_local.dtype))         # 0D float tensor in [0,1]
+
+        # gather needs 1D indices per batch; expand to [B,1]
+        B = z_sorted_local.size(0)
+        lo_idx = lo.expand(B).unsqueeze(1)                # [B,1]
+        hi_idx = hi.expand(B).unsqueeze(1)                # [B,1]
+
+        z_lo = torch.gather(z_sorted_local, dim=-1, index=lo_idx).squeeze(1)  # [B]
+        z_hi = torch.gather(z_sorted_local, dim=-1, index=hi_idx).squeeze(1)  # [B]
+
+        return (1.0 - w) * z_lo + w * z_hi                # [B]
+
+
+    p05 = interp_at(0.05).mean().item()
+    p50 = interp_at(0.50).mean().item()
+    p95 = interp_at(0.95).mean().item()
+
+    # cvar at alpha: mean of lower tail up to quantile alpha
+    def cvar_alpha(alpha: float) -> float:
+        k = max(1, int(alpha * taus.numel()))
+        return z_sorted[:, :k].mean().item()
+
+    return {
+        "v_mean_mb": v_mean.mean().item(),
+        "v_std_mb": v_std.mean().item(),
+        "p05": p05,
+        "p50": p50,
+        "p95": p95,
+        "cvar10": cvar_alpha(0.10),
+        # for plotting
+        "_z_mean": z_mean.cpu().numpy(),
+        "_z_q25": z_q25.cpu().numpy(),
+        "_z_q75": z_q75.cpu().numpy(),
+    }
+
+@torch.no_grad()
+def plot_quantile_ribbon(
+    taus: torch.Tensor,
+    z_mean_np: np.ndarray,
+    z_q25_np: np.ndarray,
+    z_q75_np: np.ndarray,
+    out_path: str,
+    title: str,
+):
+    _ensure_dir(os.path.dirname(out_path))
+    plt.figure(figsize=(6,4), dpi=150)
+    t = taus.detach().cpu().numpy()
+    plt.plot(t, z_mean_np, label="batch mean quantile curve")
+    plt.fill_between(t, z_q25_np, z_q75_np, alpha=0.25, label="IQR across states")
+    plt.xlabel("tau")
+    plt.ylabel("quantile value")
+    plt.title(title)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+@torch.no_grad()
+def plot_example_states(
+    taus: torch.Tensor,
+    z: torch.Tensor,            # [B, N], NOT necessarily sorted
+    out_path: str,
+    title: str,
+):
+    _ensure_dir(os.path.dirname(out_path))
+    # choose three representative states by mean value: low, median, high
+    z_sorted, _ = torch.sort(z, dim=-1)
+    v_mean = z_sorted.mean(dim=-1)
+    order = torch.argsort(v_mean)
+    idxs = [order[0].item(), order[len(order)//2].item(), order[-1].item()] if z.size(0) >= 3 else list(range(z.size(0)))
+
+    t = taus.detach().cpu().numpy()
+    plt.figure(figsize=(6,4), dpi=150)
+    for i in idxs:
+        zi = z_sorted[i].detach().cpu().numpy()
+        plt.plot(t, zi, label=f"state idx {i}")
+    plt.xlabel("tau")
+    plt.ylabel("quantile value")
+    plt.title(title)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+@torch.no_grad()
+def log_distributional_visuals_wandb(
+    glob_batch: torch.Tensor,   # [B, C, H, W]
+    model,
+    device: torch.device,
+    wb_step: Optional[int],
+    split: str = "train",       # or "eval"
+    max_batch: int = 128,
+):
+    """
+    Creates and logs:
+      1) Quantile ribbon over batch (mean and IQR).
+      2) Example state quantile curves (low/median/high).
+      3) Scalar risk diagnostics.
+    No-op for expected critic.
+    """
+    if not hasattr(model.critic, "taus"):
+        return  # expected critic: nothing to visualize
+
+    # slice a manageable batch from whatever you give us
+    B = glob_batch.size(0)
+    mb = min(B, max_batch)
+    z = model.critic(glob_batch[:mb].to(device))  # [mb, N]
+    taus = model.critic.taus
+
+    diags = dist_critic_diagnostics(z, taus)
+    # plots
+    out_dir = os.path.join("outputs", "vis")
+    fig1 = os.path.join(out_dir, f"{split}_quantile_ribbon_step_{wb_step}.png")
+    fig2 = os.path.join(out_dir, f"{split}_example_states_step_{wb_step}.png")
+
+    plot_quantile_ribbon(taus, diags["_z_mean"], diags["_z_q25"], diags["_z_q75"], out_path=fig1,
+                         title=f"{split.upper()} critic: batch quantile ribbon")
+    plot_example_states(taus, z, out_path=fig2,
+                        title=f"{split.upper()} critic: example state quantiles")
+
+    # log images + diagnostics
+    try:
+        wandb.log({
+            f"{split}/critic_quantile_ribbon": wandb.Image(fig1),
+            f"{split}/critic_example_states": wandb.Image(fig2),
+            f"{split}/critic_v_mean_mb": diags["v_mean_mb"],
+            f"{split}/critic_v_std_mb": diags["v_std_mb"],
+            f"{split}/critic_p05": diags["p05"],
+            f"{split}/critic_p50": diags["p50"],
+            f"{split}/critic_p95": diags["p95"],
+            f"{split}/critic_cvar10": diags["cvar10"],
+        }, step=wb_step)
+    except Exception as e:
+        wandb.log({f"{split}/critic_vis_error": str(e)}, step=wb_step)

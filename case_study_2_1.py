@@ -24,7 +24,7 @@ def main(config_path: str):
     wandb_helper.init_wandb(cfg.wandb_project, cfg.wandb_run_name, asdict(cfg))
 
     env = MultiAgentGridWorld(cfg)
-    model = MAPPOModel.build(n_actions=5, ego_k=cfg.ego_k, n_agents=cfg.n_agents)
+    model = MAPPOModel.build(n_actions=5, ego_k=cfg.ego_k, n_agents=cfg.n_agents, critic_type=cfg.param_type)
 
     actor_arch_path = os.path.join(save_path, "actor_arch.txt")
     critic_arch_path = os.path.join(save_path, "critic_arch.txt")

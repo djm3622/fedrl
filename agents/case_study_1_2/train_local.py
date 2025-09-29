@@ -1,6 +1,7 @@
 from agents.case_study_1_2.train_helper import (
     RolloutBuffer, compute_gae, run_eval_rollout, 
-    to_tchw, ego_list_to_tchw, quantile_huber_loss
+    to_tchw, ego_list_to_tchw, quantile_huber_loss,
+    log_distributional_visuals_wandb
 )
 import torch
 import wandb
@@ -221,7 +222,6 @@ def train(cfg, env, model, device):
             "optim/lr_actor": opt_actor.param_groups[0]["lr"],
             "optim/lr_critic": opt_critic.param_groups[0]["lr"],
             "rollout/len": B,
-            "critic/is_distributional": float(is_dist),  # NEW: helpful flag
         }
 
         # Optional extra diagnostics for dist critic
@@ -244,6 +244,16 @@ def train(cfg, env, model, device):
                 "env/episodes": len(ep_returns),
                 "env/steps": total_env_steps,
             }, step=total_env_steps)
+            if hasattr(model.critic, "taus"):
+                glob_dbg = glob_batch[:min(128, glob_batch.size(0))]  # [B', C, H, W]
+                log_distributional_visuals_wandb(
+                    glob_batch=glob_dbg,
+                    model=model,
+                    device=device,
+                    wb_step=total_env_steps,
+                    split="train",
+                    max_batch=128,
+                )
 
         if total_env_steps >= next_eval:
             eval_gif = f"outputs/eval/seed_{cfg.seed}_step_{total_env_steps}.gif"
