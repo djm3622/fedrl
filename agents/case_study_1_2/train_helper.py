@@ -247,3 +247,22 @@ def run_eval_rollout(
         model.actor.set_exploration_eps(eps_restore)
 
     return metrics
+
+
+def quantile_huber_loss(pred: torch.Tensor, target: torch.Tensor, taus: torch.Tensor, kappa: float = 1.0) -> torch.Tensor:
+    """
+    pred:   [B, N] predicted quantiles (per fixed taus)
+    target: [B, N] target samples at same quantile positions
+    taus:   [N]    fixed quantile levels in (0,1)
+
+    Returns scalar loss (mean over batch and quantiles).
+    """
+    # pairwise TD errors at corresponding quantiles
+    u = target.detach() - pred  # [B, N]
+    abs_u = u.abs()
+    # Huber
+    huber = torch.where(abs_u <= kappa, 0.5 * u.pow(2), kappa * (abs_u - 0.5 * kappa))
+    # Asymmetric quantile weighting
+    tau = taus.view(1, -1)  # [1, N]
+    loss = torch.where(u < 0.0, (1.0 - tau) * huber, tau * huber)
+    return loss.mean()

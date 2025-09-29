@@ -120,22 +120,73 @@ class CentralCritic(nn.Module):
         super().__init__()
         self.encoder = GlobalEncoder(in_ch=6, feat_dim=256)
         self.v = nn.Linear(256, 1)
+
     def forward(self, global_planes: torch.Tensor) -> torch.Tensor:
         z = self.encoder(global_planes)
         v = self.v(z)
-        return v.squeeze(-1)
+        return v.squeeze(-1)  # [B]
+
+    @torch.no_grad()
+    def mean_value(self, global_planes: torch.Tensor) -> torch.Tensor:
+        # provide the same method name as the distributional critic
+        return self.forward(global_planes)  # [B
+
+
+class DistValueCritic(nn.Module):
+    """
+    Centralized distributional state-value critic (QR).
+    Predicts N fixed quantiles of Z(s). Mean across quantiles is V(s).
+    """
+    def __init__(self, in_ch: int = 6, feat_dim: int = 256, n_quantiles: int = 51):
+        super().__init__()
+        self.encoder = GlobalEncoder(in_ch=in_ch, feat_dim=feat_dim)
+        self.n_quantiles = n_quantiles
+        # fixed taus: midpoints of [0,1]
+        taus = (torch.arange(n_quantiles, dtype=torch.float32) + 0.5) / n_quantiles
+        self.register_buffer("taus", taus)  # [N]
+        self.head = nn.Linear(feat_dim, n_quantiles)
+
+    def forward(self, global_planes: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            global_planes: [B, C, H, W]
+        Returns:
+            quantiles: [B, N] predicted sample points of Z(s)
+        """
+        z = self.encoder(global_planes)        # [B, feat_dim]
+        q = self.head(z)                       # [B, N]
+        return q
+
+    @torch.no_grad()
+    def mean_value(self, global_planes: torch.Tensor) -> torch.Tensor:
+        """
+        Returns:
+            V(s) as the mean over predicted quantiles. Shape: [B]
+        """
+        q = self.forward(global_planes)        # [B, N]
+        return q.mean(dim=-1)
+
 
 
 @dataclass
 class MAPPOModel:
     actor: ActorPolicy
-    critic: CentralCritic
+    critic: nn.Module  # common supertype so either critic fits
 
     @staticmethod
-    def build(n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
-              hidden_dim: int = 128, eps_explore: float = 0.05) -> "MAPPOModel":
-        return MAPPOModel(
-            actor=ActorPolicy(n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,
-                              hidden_dim=hidden_dim, eps_explore=eps_explore),
-            critic=CentralCritic()
+    def build(
+        n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
+        hidden_dim: int = 128, eps_explore: float = 0.05,
+        critic_type: str = "expected", n_quantiles: int = 51
+    ) -> "MAPPOModel":
+        actor = ActorPolicy(
+            n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,
+            hidden_dim=hidden_dim, eps_explore=eps_explore
         )
+        if critic_type == "expected":
+            critic = CentralCritic()
+        elif critic_type == "distributional":
+            critic = DistValueCritic(n_quantiles=n_quantiles)
+        else:
+            raise ValueError(f"Unknown critic_type: {critic_type}")
+        return MAPPOModel(actor=actor, critic=critic)
