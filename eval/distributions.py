@@ -4,12 +4,17 @@ import numpy as np
 import matplotlib.pyplot as plt
 import torch
 from pathlib import Path
-import imageio.v2 as iio
+import imageio.v2 as iio # pyright: ignore[reportMissingImports]
 
 from utils.general import _ensure_dir
 
 import matplotlib
-matplotlib.use("Agg")  # belt-and-suspenders; also must precede pyplot
+matplotlib.use("Agg")
+
+import torch
+import wandb
+import os
+from eval.metric_losses import dist_critic_diagnostics
 
 
 @torch.no_grad()
@@ -33,14 +38,12 @@ def save_round_plots(
     device = next(client_models[0].parameters()).device
     K = int(client_models[0].n_arms)
 
-    # --- sanitize shapes/types ---
     z = np.asarray(z, dtype=float).ravel()
 
     dz = float(z[1] - z[0]) if z.size > 1 else 1.0
 
     for i, model in enumerate(client_models):
         for a in range(K):
-            # Predicted categorical distribution for (client i, arm a)
             p_pred = model(torch.tensor([[a]], device=device)).squeeze(0).detach().cpu().numpy()
             p_true = env.estimate_truth_hist(z, i, a, nsamp=truth_nsamp)
 
@@ -127,3 +130,100 @@ def compile_videos(
                 for fr in frames:
                     w.append_data(fr)
 
+
+@torch.no_grad()
+def plot_quantile_ribbon(
+    taus: torch.Tensor,
+    z_mean_np: np.ndarray,
+    z_q25_np: np.ndarray,
+    z_q75_np: np.ndarray,
+    out_path: str,
+    title: str,
+):
+    _ensure_dir(os.path.dirname(out_path))
+    plt.figure(figsize=(6,4), dpi=150)
+    t = taus.detach().cpu().numpy()
+    plt.plot(t, z_mean_np, label="batch mean quantile curve")
+    plt.fill_between(t, z_q25_np, z_q75_np, alpha=0.25, label="IQR across states")
+    plt.xlabel("tau")
+    plt.ylabel("quantile value")
+    plt.title(title)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+@torch.no_grad()
+def plot_example_states(
+    taus: torch.Tensor,
+    z: torch.Tensor,            # [B, N], NOT necessarily sorted
+    out_path: str,
+    title: str,
+):
+    _ensure_dir(os.path.dirname(out_path))
+    # choose three representative states by mean value: low, median, high
+    z_sorted, _ = torch.sort(z, dim=-1)
+    v_mean = z_sorted.mean(dim=-1)
+    order = torch.argsort(v_mean)
+    idxs = [order[0].item(), order[len(order)//2].item(), order[-1].item()] if z.size(0) >= 3 else list(range(z.size(0)))
+
+    t = taus.detach().cpu().numpy()
+    plt.figure(figsize=(6,4), dpi=150)
+    for i in idxs:
+        zi = z_sorted[i].detach().cpu().numpy()
+        plt.plot(t, zi, label=f"state idx {i}")
+    plt.xlabel("tau")
+    plt.ylabel("quantile value")
+    plt.title(title)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
+
+
+@torch.no_grad()
+def log_distributional_visuals_wandb(
+    glob_batch: torch.Tensor,   # [B, C, H, W]
+    model,
+    device: torch.device,
+    wb_step: Optional[int],
+    split: str = "train",       # or "eval"
+    max_batch: int = 128,
+):
+    if not hasattr(model.critic, "taus"):
+        return  # expected critic: nothing to visualize
+
+    # slice a manageable batch from whatever you give us
+    B = glob_batch.size(0)
+    mb = min(B, max_batch)
+    z = model.critic(glob_batch[:mb].to(device))  # [mb, N]
+    taus = model.critic.taus
+
+    diags = dist_critic_diagnostics(z, taus)
+    out_dir = os.path.join("outputs", "vis")
+    fig1 = os.path.join(out_dir, f"{split}_quantile_ribbon_step_{wb_step}.png")
+    fig2 = os.path.join(out_dir, f"{split}_example_states_step_{wb_step}.png")
+
+    plot_quantile_ribbon(
+        taus, diags["_z_mean"], diags["_z_q25"], diags["_z_q75"], out_path=fig1,
+        title=f"{split.upper()} critic: batch quantile ribbon"
+    )
+    plot_example_states(
+        taus, z, out_path=fig2,
+        title=f"{split.upper()} critic: example state quantiles"
+    )
+
+    try:
+        wandb.log({
+            f"{split}/critic_quantile_ribbon": wandb.Image(fig1),
+            f"{split}/critic_example_states": wandb.Image(fig2),
+            f"{split}/critic_v_mean_mb": diags["v_mean_mb"],
+            f"{split}/critic_v_std_mb": diags["v_std_mb"],
+            f"{split}/critic_p05": diags["p05"],
+            f"{split}/critic_p50": diags["p50"],
+            f"{split}/critic_p95": diags["p95"],
+            f"{split}/critic_cvar10": diags["cvar10"],
+        }, step=wb_step)
+    except Exception as e:
+        wandb.log({f"{split}/critic_vis_error": str(e)}, step=wb_step)

@@ -1,15 +1,24 @@
 train:
   device: "cuda"
   total_steps: 6000000
-  rollout_len: 512
+  rollout_len: 1024
   update_epochs: 4
   minibatches: 4
   gamma: 0.99
   gae_lambda: 0.95
   clip_eps: 0.2
   vf_coef: 0.5
-  ent_coef: 0.02
-  lr: 0.0001
+  ent_coef: 0.05
+
+  critic_target_ema: 0.01
+  lr_actor: 0.0001
+  lr_critic: 0.0002
+  critic_weight_decay: 0.0
+  qr_kappa: 1.0
+  n_quantiles: 21
+  mean_anchor_coef: 0.1
+  exploration_eps: 0.05
+
   max_grad_norm: 0.5
   seed: 0
   log_interval: 1000

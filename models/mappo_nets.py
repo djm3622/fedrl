@@ -129,7 +129,6 @@ class CentralCritic(nn.Module):
 
     @torch.no_grad()
     def mean_value(self, global_planes: torch.Tensor) -> torch.Tensor:
-        # provide the same method name as the distributional critic
         return self.forward(global_planes)  # [B
 
 
@@ -167,10 +166,6 @@ class DistValueCritic(nn.Module):
 
     @torch.no_grad()
     def mean_value(self, global_planes: torch.Tensor) -> torch.Tensor:
-        """
-        Returns:
-            V(s) as the mean over predicted quantiles. Shape: [B]
-        """
         q = self.forward(global_planes)        # [B, N]
         return q.mean(dim=-1)
 
@@ -178,7 +173,7 @@ class DistValueCritic(nn.Module):
 @dataclass
 class MAPPOModel:
     actor: ActorPolicy
-    critic: nn.Module  # common supertype so either critic fits
+    critic: nn.Module
 
     @staticmethod
     def build(

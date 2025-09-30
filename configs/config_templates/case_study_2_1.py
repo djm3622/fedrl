@@ -5,8 +5,6 @@ from collections import deque
 
 Coord = Tuple[int, int]  # (row, col)
 
-# --- Obstacle templates (canonical keys are lowercase alnum with no separators) ---
-# We accept "WarehouseA", "warehouse_a", "WAREHOUSE-A", etc.
 def _canon(s: Optional[str]) -> Optional[str]:
     if s is None: return None
     return "".join(ch for ch in s.lower() if ch.isalnum())
@@ -21,7 +19,6 @@ _OBSTACLE_TEMPLATES: Dict[str, Iterable[Coord]] = {
 
 @dataclass
 class MultiAgentGridConfig:
-    # --- trainer (unused by env but kept for completeness) ---
     device: str = "cuda"
     total_steps: int = 5_000_000
     rollout_len: int = 512
@@ -32,7 +29,6 @@ class MultiAgentGridConfig:
     clip_eps: float = 0.2
     vf_coef: float = 0.5
     ent_coef: float = 0.02
-    lr: float = 1e-4
     max_grad_norm: float = 0.5
     seed: int = 42
     log_interval: int = 1_000
@@ -43,7 +39,6 @@ class MultiAgentGridConfig:
     wandb_mode: str = "online"
     log_video: bool = False
 
-    # --- map ---
     H: int = 10
     W: int = 10
 
@@ -53,35 +48,28 @@ class MultiAgentGridConfig:
     obstacles: Iterable[Coord] = field(default_factory=list)
     obstacle_template_id: Optional[str] = "WarehouseA"  # case/format-insensitive
 
-    # Hazard region (inclusive bounds). If cells provided, bounds ignored.
     hazard_zone_cells: Optional[Iterable[Coord]] = None
     hazard_zone_bounds: Optional[Tuple[int, int, int, int]] = (2, 6, 4, 8)
 
-    # client-specific hazard severity
     hazard_prob: float = 0.20
     hazard_loss: float = 120.0
 
-    # base costs/rewards
     step_cost: float = -0.1
     goal_reward: float = +100.0
     catastrophe_reward: float = -120.0
 
-    # penalties / limits
     invalid_move_penalty: float = -0.1
     max_steps: int = 120
 
-    # MARL and dynamics
     n_agents: int = 3
     slip_prob: float = 0.05
     sample_active_hazard_each_episode: bool = False
     block_on_collision: bool = True
 
-    # Observations
     critic_obs_mode: Literal["grid", "none"] = "grid"
     actor_obs_mode: Literal["coords", "ego"] = "ego"
     ego_k: int = 5  # odd
 
-    # Movable object (crate) and pushing rules
     has_objects: bool = True
     object_starts: Sequence[Coord] = ((6, 2), (6, 3), (6, 4))
     object_goal: Optional[Coord] = (9, 5)
@@ -93,14 +81,20 @@ class MultiAgentGridConfig:
     push_step_cost: float = 0.0
     push_fail_penalty: float = 0.0
 
-    # Stacking options on goals
     allow_multi_agent_on_goal: bool = True
     allow_objects_stack_on_object_goal: bool = True
 
-    # Distributional RL options
     param_type: Literal["expected", "distributional"] = "expected"
+    
+    critic_target_ema: float = 0.01
+    lr_actor: float = 1e-4
+    lr_critic: float = 2e-4
+    critic_weight_decay: float = 0.0
+    qr_kappa: float = 1.0
+    n_quantiles: int = 21
+    mean_anchor_coef: float = 0.1
+    exploration_eps: float = 0.05
 
-    # ----------------- helpers -----------------
     def _nearest_free_noncorner(
         self,
         H: int,
@@ -161,11 +155,9 @@ class MultiAgentGridConfig:
             return [(r, c) for r in range(r0, r1 + 1) for c in range(c0, c1 + 1)]
         return []
 
-    # ----------------- validation -----------------
     def validate(self):
         H, W = int(self.H), int(self.W)
 
-        # apply obstacle template first (case/format-insensitive id)
         tid = _canon(self.obstacle_template_id)
         if tid is not None:
             if tid not in _OBSTACLE_TEMPLATES:
@@ -175,7 +167,6 @@ class MultiAgentGridConfig:
                 )
             self.obstacles = list(_OBSTACLE_TEMPLATES[tid])
 
-        # coerce numeric tuples/lists
         self.starts = tuple((int(r), int(c)) for r, c in self.starts)
         self.goals = tuple((int(r), int(c)) for r, c in self.goals)
         self.obstacles = list((int(r), int(c)) for (r, c) in self.obstacles)
