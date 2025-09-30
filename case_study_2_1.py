@@ -3,7 +3,7 @@ from dataclasses import asdict
 from utils.general import load_config
 from envs.case_study_2_1.magridworld import MultiAgentGridWorld
 from models.mappo_nets import MAPPOModel
-from agents.case_study_2_1 import train_local
+from agents.case_study_2_1 import train_single
 import os
 import torch
 from utils import wandb_helper
@@ -40,7 +40,7 @@ def main(config_path: str):
     wandb_helper.log_artifact(actor_arch_path, name="actor_architecture", type="architecture")
     wandb_helper.log_artifact(critic_arch_path, name="critic_architecture", type="architecture")
 
-    model = train_local.train(cfg, env, model, device=cfg.device)
+    model = train_single.train(cfg, env, model, device=cfg.device)
 
     actor_weights_path = os.path.join(save_path, "actor.pth")
     critic_weights_path = os.path.join(save_path, "critic.pth")
