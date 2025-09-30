@@ -19,11 +19,6 @@ class PPOTrainer:
     """
 
     def __init__(self, cfg: Any, env: Any, model: Any, device: str | torch.device, client_id: int = 0):
-        # runtime guards only
-        assert hasattr(model, "actor") and hasattr(model, "critic"), "model must have actor and critic"
-        assert hasattr(model.actor, "init_hidden"), "actor must define init_hidden(n_agents, device)"
-        assert hasattr(env, "reset") and hasattr(env, "step") and hasattr(env, "cfg"), "env must expose reset/step and cfg"
-
         self.cfg = cfg
         self.env = env
         self.model = model
@@ -32,8 +27,7 @@ class PPOTrainer:
 
         self.model.actor.to(self.device)
         self.model.critic.to(self.device)
-        if hasattr(self.model.actor, "set_exploration_eps"):
-            self.model.actor.set_exploration_eps(cfg.exploration_eps)
+        self.model.actor.set_exploration_eps(cfg.exploration_eps)
 
         self.hidden_dim = self.model.actor.hidden_dim
         self.h_actor = self.model.actor.init_hidden(self.env.cfg.n_agents, self.device)
