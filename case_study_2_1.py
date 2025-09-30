@@ -1,7 +1,7 @@
 import argparse
 from dataclasses import asdict
 from utils.general import load_config
-from envs.case_study_1_2.magridworld import MultiAgentGridWorld
+from envs.case_study_2_1.magridworld import MultiAgentGridWorld
 from models.mappo_nets import MAPPOModel
 from agents.case_study_2_1 import train_local
 import os

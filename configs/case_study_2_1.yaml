@@ -31,6 +31,12 @@ train:
 
   param_type: "distributional"
 
+  # federation
+  num_communication_rounds: 1
+  local_epochs_per_round: 1
+  n_clients: 1
+  client_weights: [1.0]
+
 env:
   H: 10
   W: 10

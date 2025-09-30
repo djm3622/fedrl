@@ -95,6 +95,12 @@ class MultiAgentGridConfig:
     mean_anchor_coef: float = 0.1
     exploration_eps: float = 0.05
 
+    # federation
+    num_communication_rounds: int = 1
+    local_epochs_per_round: int = 1
+    n_clients: int = 1
+    client_weights: List[float] = field(default_factory=lambda: [1.0])
+
     def _nearest_free_noncorner(
         self,
         H: int,
