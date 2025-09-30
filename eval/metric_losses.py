@@ -3,7 +3,7 @@ import matplotlib.pyplot as plt
 from utils.general import _ensure_dir, save_gif, capture_frame
 import torch
 import numpy as np
-from agents.case_study_2_1.train_helper import to_tchw, ego_list_to_tchw
+from agents.case_study_2_1.ppo_utils.helpers import to_tchw, ego_list_to_tchw
 import wandb
 import os
 

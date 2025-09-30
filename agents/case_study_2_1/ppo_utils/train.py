@@ -1,7 +1,8 @@
 
-
-# this file needs to now support multiple clients training, they should all run on the same gpu in parellel
-
+# this files should support training a single PPO agent
+# changes should be made to accomodate the federated server setup later
+# it should also support the fedrl training additon to pull on the reward distribution
+# the trainn should be broken into a step and each multi-run file should handle their own training loops
 
 import numpy as np
 import torch
