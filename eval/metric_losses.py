@@ -179,35 +179,31 @@ def run_eval_rollout(
             out = model.actor(ego_bna, agent_ids)
             dists = out[0] if isinstance(out, tuple) else out
 
-        # Choose actions
         if deterministic:
             actions = torch.argmax(dists.probs, dim=-1)  # [A]
         else:
             actions = dists.sample()
 
-        # Track action probs (support 4 or 5 actions)
+        # track action probs (support 4 or 5 actions)
         probs = dists.probs.detach().cpu().numpy()       # [A, n_actions]
         if probs_running_sum is None:
             probs_running_sum = np.zeros(probs.shape[1], dtype=np.float64)
         probs_running_sum += probs.mean(axis=0)
         probs_count += 1
 
-        # Env step
         act_dict = {i: int(actions[i].item()) for i in range(n_agents)}
         (actor_obs_next, critic_obs_next), team_rew, terminated, truncated, info = env.step(act_dict)
 
-        # Record frame after step
+        # record frame after step
         if record:
             f = capture_frame(env)
             if f is not None:
                 frames.append(f)
 
-        # Returns
         team_return += float(team_rew)
         if "rewards_per_agent" in info and isinstance(info["rewards_per_agent"], (list, tuple)):
             per_agent_return += np.array(info["rewards_per_agent"], dtype=np.float64)
 
-        # Deliveries & object motion
         if "objects_delivered_new" in info:
             deliveries += int(info.get("objects_delivered_new", 0))
             if first_delivery_t is None and info.get("objects_delivered_total", 0) > 0:
@@ -222,7 +218,6 @@ def run_eval_rollout(
         steps += 1
         actor_obs, _ = actor_obs_next, critic_obs_next
 
-        # Stop
         if terminated or truncated:
             break
         if max_steps is not None and steps >= max_steps:
@@ -261,7 +256,6 @@ def run_eval_rollout(
         wandb.log({**metrics, **term_flags}, step=wb_step)
         try:
             art = wandb.Artifact("eval_gifs", type="evaluation")
-            # store under your chosen name
             desired_name = os.path.basename(gif_path)
             art.add_file(gif_path, name=desired_name)
             wandb.log_artifact(art)

@@ -27,8 +27,8 @@ def save_round_plots(
     z: np.ndarray,                         # shape [A]
     out_root: str = "plots",
     truth_nsamp: int = 30_000,
-    global_pbars: Optional[np.ndarray] = None,  # shape [K, A] if provided
-    loo_pbars: Optional[np.ndarray] = None,     # shape [N, K, A] if provided
+    global_pbars: Optional[np.ndarray] = None,  # shape [K, A]
+    loo_pbars: Optional[np.ndarray] = None,     # shape [N, K, A]
     save_npz: bool = False,
 ) -> None:
 
