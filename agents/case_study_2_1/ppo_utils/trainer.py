@@ -18,7 +18,7 @@ class PPOTrainer:
     Exposes small steps so a multi-client runner can interleave collection and updates.
     """
 
-    def __init__(self, cfg: Any, env: Any, model: Any, device: str | torch.device, client_id: int = 0):
+    def __init__(self, cfg: Any, env: Any, model: Any, device: torch.device, client_id: int = 0):
         self.cfg = cfg
         self.env = env
         self.model = model

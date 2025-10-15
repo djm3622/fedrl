@@ -1,5 +1,5 @@
 train:
-  device: "cuda"
+  device: "mps"
   total_steps: 6000000
   rollout_len: 1024
   update_epochs: 4
@@ -32,10 +32,10 @@ train:
   param_type: "distributional"
 
   # federation
-  num_communication_rounds: 1
-  local_epochs_per_round: 1
-  n_clients: 1
-  client_weights: [1.0]
+  num_communication_rounds: 1000
+  local_epochs_per_round: 100
+  n_clients: 3
+  client_weights: [0.33, 0.33, 0.34]
 
 env:
   H: 10
