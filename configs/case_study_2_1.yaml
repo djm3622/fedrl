@@ -25,17 +25,17 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_v0"
+  wandb_run_name: "case_study_1_2_distributional_v1"
   wandb_mode: "online"
   log_video: false
 
   param_type: "distributional"
 
   # federation
-  num_communication_rounds: 1000
-  local_epochs_per_round: 100
+  num_communication_rounds: 10
+  local_epochs_per_round: 10
   n_clients: 3
-  client_weights: [0.33, 0.33, 0.34]
+  client_weights: [0.7, 0.12, 0.18]
 
 env:
   H: 10

@@ -68,14 +68,14 @@ def _weighted_average_state(states: List[Tuple[Dict[str, torch.Tensor], float]])
 def _server_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str | None):
     if not os.getenv("WANDB_API_KEY", ""):
         os.environ.setdefault("WANDB_MODE", "offline")
-    settings = wandb.Settings(start_method="thread")
+    # Use stable id + resume to avoid spawning extra runs
     return wandb.init(
         project=project,
-        name=name,
+        name=name + "_server",
+        id=name + "_server",
+        resume="allow",
         config=cfg_dict,
         group=group,
-        settings=settings,
-        reinit=True,
     )
 
 
@@ -98,6 +98,14 @@ class FedAvgServer:
             group=getattr(cfg, "wandb_group", None),
         )
 
+        # server absolute step base (for monotonic logging across resumes)
+        self.server_step_base = 0
+        if self.run is not None and getattr(self.run, "resumed", False):
+            self.server_step_base = int(self.run.summary.get("server/last_step", 0))
+
+    def _wb_step(self) -> int:
+        return int(self.server_step_base + self.round_idx)
+
     # -------- global critic weights io --------
     def get_global_critic_state(self) -> Dict[str, torch.Tensor]:
         return pack_critic_state(self.model)
@@ -115,11 +123,14 @@ class FedAvgServer:
         self.load_global_critic_state(avg_state)
 
         total_samples = int(sum(max(0, int(ns)) for (_, _, ns) in client_payloads))
-        wandb.log({
-            "server/round": int(self.round_idx),
-            "server/total_samples_round": total_samples,
-            "server/num_clients_round": len(client_payloads),
-        })
+        if self.run is not None:
+            wandb.log({
+                "server/round": int(self.round_idx),
+                "server/total_samples_round": total_samples,
+                "server/num_clients_round": len(client_payloads),
+            }, step=self._wb_step())
+            # persist last step to support resume
+            self.run.summary["server/last_step"] = self._wb_step()
 
     # -------- checkpointing (save both modules for convenience) --------
     def save_checkpoint(self, save_dir: str, tag: str):

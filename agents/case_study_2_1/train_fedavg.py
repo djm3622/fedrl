@@ -53,8 +53,16 @@ def _spread_value(center: float, delta: float, rank: int, n_clients: int) -> flo
     return float(max(0.0, min(1.0, (center - delta) + (2.0 * delta) * t)))
 
 
-def _compute_client_epochs(local_epochs_per_round: int, n_clients: int, weights) -> int:
-    return max(1, math.ceil(local_epochs_per_round * (weights[0] * n_clients)))
+def _compute_epochs_per_client(local_epochs_per_round: int, n_clients: int, weights) -> list[int]:
+    """
+    Allocate local epochs proportional to client_weights.
+    Sum_i epochs_i ~= local_epochs_per_round * n_clients.
+    """
+    out = []
+    for i in range(n_clients):
+        e_i = max(1, math.ceil(local_epochs_per_round * float(weights[i]) * n_clients))
+        out.append(int(e_i))
+    return out
 
 
 def _model_builder_from_cfg(cfg) -> MAPPOModel:
@@ -68,24 +76,33 @@ def _model_builder_from_cfg(cfg) -> MAPPOModel:
 
 
 def _client_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str | None, rank: int):
+    """
+    Create a single, stable per-client run.
+    Suffix both name and id with `_fedavg_client{rank}` so reruns resume cleanly and
+    are visually distinct from other methods.
+    """
     if not os.getenv("WANDB_API_KEY", ""):
         os.environ.setdefault("WANDB_MODE", "offline")
-    run_id = f"{name}_client{rank}"  # stable id per client
+
+    # suffix name + id for fedavg clients
+    base_name = f"{name}_fedavg_client{rank}"
+    run_id = base_name  # stable id
+
     run_dir = os.path.join(
         os.getenv("SLURM_TMPDIR", os.path.join(os.getcwd(), "wandb_cache")),
         f"client_{rank}"
     )
     os.makedirs(run_dir, exist_ok=True)
+
     settings = wandb.Settings(start_method="thread")
     try:
-        # keep a single long-lived run; no finish() until shutdown
         return wandb.init(
             project=project,
-            name=run_id,
+            name=base_name,
             id=run_id,
             resume="allow",
             config=cfg_dict,
-            group=group,
+            group=(group if group is not None else f"{name}_fedavg"),
             dir=run_dir,
             settings=settings,
         )
@@ -123,14 +140,19 @@ def _client_loop(
         cfg.hazard_prob = _spread_value(base_cfg.hazard_prob, hazard_delta, rank, n_clients)
         cfg.slip_prob   = _spread_value(base_cfg.slip_prob,   slip_delta,   rank, n_clients)
 
-        # one W&B run per client
+        # one W&B run per client (NOTE: pass per-client cfg)
         run = _client_wandb_safe_init(
             project=base_cfg.wandb_project,
             name=base_cfg.wandb_run_name,
-            cfg_dict=asdict(base_cfg),
-            group=getattr(base_cfg, "wandb_group", base_cfg.wandb_run_name),
+            cfg_dict=asdict(cfg),
+            group=getattr(base_cfg, "wandb_group", None),
             rank=rank,
         )
+
+        # base step if resuming
+        wb_step_base = 0
+        if wandb.run is not None and getattr(wandb.run, "resumed", False):
+            wb_step_base = int(wandb.run.summary.get("client/last_step", 0))
 
         # build env + model + trainer once
         env = MultiAgentGridWorld(cfg)
@@ -138,7 +160,7 @@ def _client_loop(
         model.actor.to(cfg.device)
         model.critic.to(cfg.device)
 
-        tr = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank)
+        tr = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank, wb_step_base=wb_step_base)
 
         # main command loop
         while True:
@@ -156,6 +178,10 @@ def _client_loop(
                 tr.load_critic_flat(critic_flat, reset_opt=True)
                 # train for requested epochs
                 num_samples = tr.train_for_epochs(epochs)
+
+                # persist absolute step for resume safety
+                if wandb.run is not None:
+                    wandb.run.summary["client/last_step"] = tr._wb_step()
 
                 # return new critic snapshot
                 rep_q.put({
@@ -175,26 +201,22 @@ def _client_loop(
 
 
 def run_fedavg(cfg: Any) -> Tuple[str, str]:
-    """
-    Orchestrates FedAvg rounds (critic-only). Returns (actor_path, critic_path) of server snapshot.
-    """
     device = str(cfg.device)
     n_clients = int(cfg.n_clients)
     total_cpus = int(os.getenv("SLURM_CPUS_PER_TASK", str(os.cpu_count() or 4)))
     threads_per_client = max(1, total_cpus // max(1, n_clients))
 
-    # server with initial global model
     server = FedAvgServer(cfg, lambda: _model_builder_from_cfg(cfg), device=device)
     save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
     os.makedirs(save_dir, exist_ok=True)
 
-    # FedAvg weights and per-round local epochs
+    # Normalize weights and derive per-client epoch budgets
     w = normalize_weights(cfg.client_weights, cfg.n_clients)
-    epochs_per_round = _compute_client_epochs(cfg.local_epochs_per_round, cfg.n_clients, w)
+    epochs_per_client = _compute_epochs_per_client(cfg.local_epochs_per_round, cfg.n_clients, w)
 
     ctx = mp.get_context("spawn")
 
-    # spawn long-lived clients with dedicated queues
+    # spawn long-lived clients ...
     cmd_queues: List[mp.Queue] = []
     rep_queues: List[mp.Queue] = []
     procs: List[mp.Process] = []
@@ -211,16 +233,20 @@ def run_fedavg(cfg: Any) -> Tuple[str, str]:
         rep_queues.append(rq)
         procs.append(p)
 
-    # main federated rounds
+    # federated rounds
     for rnd in range(int(cfg.num_communication_rounds)):
         server.round_idx = rnd
 
-        # broadcast current global critic to all clients and request local training
         critic_flat = server.get_global_critic_state()
+        # send each client its own epoch budget
         for rank in range(n_clients):
-            cmd_queues[rank].put({"cmd": "train_round", "critic": critic_flat, "epochs": int(epochs_per_round)})
+            cmd_queues[rank].put({
+                "cmd": "train_round",
+                "critic": critic_flat,
+                "epochs": int(epochs_per_client[rank]),
+            })
 
-        # gather client updates
+        # gather / aggregate as before ...
         payloads: List[Tuple[Dict[str, torch.Tensor], float, int]] = []
         for rank in range(n_clients):
             msg = rep_queues[rank].get()
@@ -230,12 +256,10 @@ def run_fedavg(cfg: Any) -> Tuple[str, str]:
             ns = int(msg["num_samples"])
             payloads.append((sd, float(w[rank]), ns))
 
-        # aggregate and checkpoint periodically
         server.aggregate(payloads)
         if (rnd + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", 5))) == 0 or (rnd + 1) == int(cfg.num_communication_rounds):
             server.save_checkpoint(save_dir, tag=f"round{rnd+1}")
 
-    # tell clients to shutdown and join
     for cq in cmd_queues:
         cq.put({"cmd": "shutdown"})
     for p in procs:

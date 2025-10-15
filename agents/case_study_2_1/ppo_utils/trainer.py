@@ -18,12 +18,13 @@ class PPOTrainer:
     Exposes small steps so a multi-client runner can interleave collection and updates.
     """
 
-    def __init__(self, cfg: Any, env: Any, model: Any, device: torch.device, client_id: int = 0):
+    def __init__(self, cfg: Any, env: Any, model: Any, device: torch.device, client_id: int = 0, wb_step_base: int = 0):
         self.cfg = cfg
         self.env = env
         self.model = model
         self.device = torch.device(device)
         self.client_id = client_id
+        self.wb_step_base = int(wb_step_base)  # absolute step offset for monotonic W&B logging
 
         self.model.actor.to(self.device)
         self.model.critic.to(self.device)
@@ -60,7 +61,11 @@ class PPOTrainer:
 
         self.is_dist = hasattr(self.model.critic, "taus")
 
-    # --- NEW: load broadcast critic (flat dict with "critic.*" keys) and optionally reset optimizer state
+    # --- absolute W&B step helper (monotonic across resumes) ---
+    def _wb_step(self) -> int:
+        return int(self.wb_step_base + self.total_env_steps)
+
+    # --- load broadcast critic (flat dict with "critic.*" keys) and optionally reset optimizer state
     def load_critic_flat(self, flat_state: Dict[str, torch.Tensor], reset_opt: bool = True) -> None:
         critic_sd: Dict[str, torch.Tensor] = {}
         for k, v in flat_state.items():
@@ -73,7 +78,7 @@ class PPOTrainer:
             # preserve lr and hyperparams, but clear moments to avoid mismatch after FedAvg
             self.opt_critic.state.clear()
 
-    # --- NEW: train for a fixed number of epochs, honoring cfg.total_steps as early stop
+    # --- train for a fixed number of epochs, honoring cfg.total_steps as early stop
     def train_for_epochs(self, n_epochs: int) -> int:
         steps_start = self.total_env_steps
         for _ in range(int(n_epochs)):
@@ -146,7 +151,7 @@ class PPOTrainer:
                 f"client{self.client_id}/ep/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
                 f"client{self.client_id}/ep/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
                 f"client{self.client_id}/ep/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
-            }, step=self.total_env_steps)
+            }, step=self._wb_step())
 
             self.ep_returns.append(self.ep_return)
             self.h_actor = self.model.actor.init_hidden(self.n_agents, self.device)
@@ -212,7 +217,7 @@ class PPOTrainer:
             f"client{self.client_id}/env/steps": self.total_env_steps,
         })
 
-        wandb.log(metrics, step=self.total_env_steps)
+        wandb.log(metrics, step=self._wb_step())
 
         if self.total_env_steps % self.cfg.log_interval == 0:
             mean_ret = float(np.mean(self.ep_returns[-10:])) if self.ep_returns else 0.0
@@ -220,7 +225,7 @@ class PPOTrainer:
                 f"client{self.client_id}/train/mean_ep_ret_10": mean_ret,
                 f"client{self.client_id}/train/last_v": float(last_v),
                 f"client{self.client_id}/env/episodes": len(self.ep_returns),
-            }, step=self.total_env_steps)
+            }, step=self._wb_step())
 
             if self.is_dist:
                 glob_dbg = glob_batch[: min(128, glob_batch.size(0))]
@@ -228,7 +233,7 @@ class PPOTrainer:
                     glob_batch=glob_dbg,
                     model=self.model,
                     device=str(self.device),
-                    wb_step=self.total_env_steps,
+                    wb_step=self._wb_step(),
                     split=f"train_client{self.client_id}",
                     max_batch=128,
                 )
@@ -246,6 +251,6 @@ class PPOTrainer:
                 record=True,
                 log_wandb=True,
                 gif_path=eval_gif,
-                wb_step=self.total_env_steps,
+                wb_step=self._wb_step(),
             )
             self.next_eval += self.cfg.eval_every_steps
