@@ -60,6 +60,34 @@ class PPOTrainer:
 
         self.is_dist = hasattr(self.model.critic, "taus")
 
+    # --- NEW: load broadcast critic (flat dict with "critic.*" keys) and optionally reset optimizer state
+    def load_critic_flat(self, flat_state: Dict[str, torch.Tensor], reset_opt: bool = True) -> None:
+        critic_sd: Dict[str, torch.Tensor] = {}
+        for k, v in flat_state.items():
+            if not k.startswith("critic."):
+                raise KeyError(f"unexpected non-critic key in flat_state: {k}")
+            critic_sd[k[len("critic."):]] = v
+        self.model.critic.load_state_dict(critic_sd, strict=True)
+        self.model.critic.to(self.device)
+        if reset_opt:
+            # preserve lr and hyperparams, but clear moments to avoid mismatch after FedAvg
+            self.opt_critic.state.clear()
+
+    # --- NEW: train for a fixed number of epochs, honoring cfg.total_steps as early stop
+    def train_for_epochs(self, n_epochs: int) -> int:
+        steps_start = self.total_env_steps
+        for _ in range(int(n_epochs)):
+            while not self.roll.full():
+                self.collect_rollout_step()
+                if self.total_env_steps >= self.cfg.total_steps:
+                    break
+            if self.roll.ptr > 0:
+                self.update_epoch()
+            self.maybe_eval()
+            if self.total_env_steps >= self.cfg.total_steps:
+                break
+        return int(self.total_env_steps - steps_start)
+
     # ---------- collection ----------
 
     def _forward_policy(self, ego_bna: torch.Tensor, agent_ids: torch.Tensor, h_in: torch.Tensor):
