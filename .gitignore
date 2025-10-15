@@ -6,6 +6,7 @@ artifacts/
 
 test.ipynb
 batch_train.sh
+batch_p_train.sh
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
