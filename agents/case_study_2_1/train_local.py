@@ -190,6 +190,7 @@ def run_local_multi(cfg: Any) -> List[Tuple[str, str]]:
     os.makedirs(save_root, exist_ok=True)
 
     # total local epochs per client (proportional to weights), matched to federated budget
+    w = normalize_weights(cfg.client_weights, cfg.n_clients)
     epochs_per_client = _compute_epochs_per_client(cfg.local_epochs_per_round, cfg.n_clients, w)
 
     ctx = mp.get_context("spawn")

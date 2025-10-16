@@ -11,12 +11,13 @@ from utils.general import load_config
 from utils import wandb_helper
 from envs.case_study_2_1.magridworld import MultiAgentGridWorld
 from models.mappo_nets import MAPPOModel
-from agents.case_study_2_1 import train_single
 
 # runners
 from agents.case_study_2_1.train_fedavg import run_fedavg
 from agents.case_study_2_1.train_fedtrunc import run_fedtrunc
 from agents.case_study_2_1.train_local import run_local_multi
+from agents.case_study_2_1.train_fedrl import run_fedrl
+
 import wandb
 
 
@@ -53,7 +54,7 @@ def main():
     parser.add_argument("--config", type=str, help="Path to the config file.")
     parser.add_argument(
         "--method", type=str, default="local",
-        choices=["local", "fedavg", "fedtrunc"],
+        choices=["local", "fedavg", "fedtrunc", "fedrl"],
         help="Training method."
     )
     args = parser.parse_args()
@@ -83,6 +84,12 @@ def main():
         _ensure_archives(cfg, tmp_model)
         actor_path, critic_path = run_fedtrunc(cfg)
         print(f"[fedtrunc] final checkpoints: {actor_path}, {critic_path}")
+
+    elif args.method == "fedrl":
+        tmp_model = _model_builder_from_cfg(cfg)
+        _ensure_archives(cfg, tmp_model)
+        enc_path, head_path = run_fedrl(cfg)
+        print(f"[fedrl] final checkpoints: {enc_path}, {head_path}")
 
 
 if __name__ == "__main__":
