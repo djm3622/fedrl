@@ -494,7 +494,7 @@ class PPOTrainer:
                     f"client{self.client_id}/stab/clamp_effect_probe": float(clamp_effect),
                 }, step=self._wb_step())
         except Exception:
-            pass
+            print(f"[Client {self.client_id}] Stability probe failed: {e}")
 
         return metrics
 
