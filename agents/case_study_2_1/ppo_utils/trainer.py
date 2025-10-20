@@ -226,6 +226,42 @@ class PPOTrainer:
             except Exception:
                 self.opt_critic = type(self.opt_critic)(self.model.critic.parameters(), **self.opt_critic.defaults)
 
+    def _compat_encode(self, critic, xs):
+        # New critics expose _encode; legacy ones expose encoder(...)
+        if hasattr(critic, "_encode"):
+            return critic._encode(xs)
+        if hasattr(critic, "encoder"):
+            with torch.no_grad():
+                return critic.encoder(xs)
+        return None
+
+    def _compat_squash(self, critic, y):
+        # Distributional critics have _squash; expected critics don’t
+        if hasattr(critic, "_squash"):
+            return critic._squash(y)
+        return y
+
+    def _compat_prior_forward(self, critic, z, xs):
+        # Prior-only forward on frozen heads if present; returns None if not wired
+        if hasattr(critic, "v_prior"):
+            if z is None: z = self._compat_encode(critic, xs)
+            return critic.v_prior(z).squeeze(-1)
+        if hasattr(critic, "head_prior"):
+            if z is None: z = self._compat_encode(critic, xs)
+            return self._compat_squash(critic, critic.head_prior(z))
+        return None
+
+    def _compat_raw_local_forward(self, critic, z, xs):
+        # Local head bypass (no affine+clamp); returns None if we can’t bypass
+        if hasattr(critic, "v"):
+            if z is None: z = self._compat_encode(critic, xs)
+            return critic.v(z).squeeze(-1)
+        if hasattr(critic, "head"):
+            if z is None: z = self._compat_encode(critic, xs)
+            return self._compat_squash(critic, critic.head(z))
+        return None
+
+
     # --- absolute W&B step helper (monotonic across resumes) ---
     def _wb_step(self) -> int:
         return int(self.wb_step_base + self.total_env_steps)
@@ -436,55 +472,49 @@ class PPOTrainer:
         # --- stability metrics (cheap, W&B-guarded) ---
         try:
             # 1) parameter drift (critic)
-            vecs = []
-            for p in self.model.critic.parameters():
-                if p.requires_grad:
-                    vecs.append(p.detach().flatten().cpu())
+            vecs = [p.detach().flatten().cpu() for p in self.model.critic.parameters() if p.requires_grad]
             cur_vec = torch.cat(vecs) if vecs else torch.empty(0)
-
             if self._prev_critic_vec is not None and cur_vec.numel() == self._prev_critic_vec.numel():
                 param_drift = torch.norm(cur_vec - self._prev_critic_vec).item()
             else:
                 param_drift = 0.0
             self._prev_critic_vec = cur_vec
 
-            # 2-4) probe-based metrics
+            # 2–4) probe-based metrics
             out_drift = prior_gap = clamp_effect = 0.0
             if len(self._probe_glob) > 0:
                 xs_probe = torch.stack(self._probe_glob, dim=0).to(self.device)
+                c = self.model.critic
 
                 with torch.no_grad():
-                    y_con = self.model.critic(xs_probe).detach().cpu()  # constrained forward (covers FedRL)
-                    # prior-only forward (if present)
-                    c = self.model.critic
-                    if hasattr(c, "v_prior"):
-                        z = c._encode(xs_probe)
-                        y_pri = c.v_prior(z).squeeze(-1).detach().cpu()
-                    elif hasattr(c, "head_prior"):
-                        z = c._encode(xs_probe)
-                        y_pri = c._squash(c.head_prior(z)).detach().cpu()
-                    else:
-                        y_pri = torch.zeros_like(y_con)
+                    # run all computations on self.device
+                    y_con = c(xs_probe).detach()
+                    z = self._compat_encode(c, xs_probe)
 
-                    # raw local (bypass affine+clamp), if possible
-                    if hasattr(c, "v"):
-                        z = c._encode(xs_probe)
-                        y_raw = c.v(z).squeeze(-1).detach().cpu()
-                    elif hasattr(c, "head"):
-                        z = c._encode(xs_probe)
-                        y_raw = c._squash(c.head(z)).detach().cpu()
-                    else:
-                        y_raw = y_con  # fallback
+                    # prior-only forward
+                    y_pri = self._compat_prior_forward(c, z, xs_probe)
+                    if y_pri is None:
+                        y_pri = torch.zeros_like(y_con, device=self.device)
 
-                def mad(a, b):  # mean absolute difference
+                    # raw local forward
+                    y_raw = self._compat_raw_local_forward(c, z, xs_probe)
+                    if y_raw is None:
+                        y_raw = y_con
+
+                    # move to CPU only after all ops
+                    y_con_cpu = y_con.cpu()
+                    y_pri_cpu = y_pri.cpu()
+                    y_raw_cpu = y_raw.cpu()
+
+                def mad(a, b):
                     return (a - b).abs().mean().item()
 
-                if self._prev_probe_out is not None and self._prev_probe_out.shape == y_con.shape:
-                    out_drift = mad(y_con, self._prev_probe_out)
-                self._prev_probe_out = y_con
+                if self._prev_probe_out is not None and self._prev_probe_out.shape == y_con_cpu.shape:
+                    out_drift = mad(y_con_cpu, self._prev_probe_out)
+                self._prev_probe_out = y_con_cpu
 
-                prior_gap = mad(y_con, y_pri)
-                clamp_effect = mad(y_con, y_raw)
+                prior_gap = mad(y_con_cpu, y_pri_cpu)
+                clamp_effect = mad(y_con_cpu, y_raw_cpu)
 
             if wandb.run is not None:
                 wandb.log({
@@ -493,8 +523,10 @@ class PPOTrainer:
                     f"client{self.client_id}/stab/prior_gap_probe": float(prior_gap),
                     f"client{self.client_id}/stab/clamp_effect_probe": float(clamp_effect),
                 }, step=self._wb_step())
-        except Exception:
-            print(f"[Client {self.client_id}] Stability probe failed: {e}")
+
+        except Exception as _e:
+            print(f"[Client {self.client_id}] Stability probe failed: {_e}")
+
 
         return metrics
 
