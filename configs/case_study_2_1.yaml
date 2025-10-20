@@ -1,5 +1,5 @@
 train:
-  device: "cuda"
+  device: "mps"
   total_steps: 6000000
   rollout_len: 1024
   update_epochs: 4
@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_v2"
+  wandb_run_name: "case_study_1_2_distributional_v16"
   wandb_mode: "online"
   log_video: false
 
@@ -35,7 +35,7 @@ train:
   num_communication_rounds: 100
   local_epochs_per_round: 50
   n_clients: 6
-  client_weights: [0.45, 0.20, 0.10, 0.10, 0.10, 0.05]
+  client_weights: [0.25, 0.20, 0.20, 0.20, 0.075, 0.075]
 
 env:
   H: 10
@@ -83,3 +83,17 @@ env:
 
   allow_multi_agent_on_goal: true
   allow_objects_stack_on_object_goal: true
+
+fedrl:
+  enable_ae_aux: false          # must be true to run and log AE
+  fedrl_d_latent: 128          # optional; default 128
+  fedrl_enc_lr: 1.0e-3         # optional
+  fedrl_dec_lr: 5.0e-4         # optional
+  fedrl_rec_lambda: 1.0e-2     # not used in the loss, only kept for compatibility
+  fedrl_latent_hw: 5
+
+  prior_enabled: true
+  prior_alpha: 0.5
+  prior_beta: 1.0
+  prior_radius_abs: 0
+  prior_radius_rel: 0.20

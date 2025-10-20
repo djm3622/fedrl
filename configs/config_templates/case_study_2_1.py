@@ -101,6 +101,21 @@ class MultiAgentGridConfig:
     n_clients: int = 1
     client_weights: List[float] = field(default_factory=lambda: [1.0])
 
+    # fedrl
+    enable_ae_aux: bool = True          # must be true to run and log AE
+    fedrl_d_latent: int = 128          # optional; default 128
+    fedrl_enc_lr: float = 1.0e-3         # optional
+    fedrl_dec_lr: float = 5.0e-4         # optional
+    fedrl_rec_lambda: float = 1.0e-2     # not used in the loss, only kept for compatibility
+    fedrl_latent_hw: int = 5
+
+    prior_enabled: bool = True
+    prior_alpha: float = 0.5
+    prior_beta: float = 1.0
+    prior_radius_abs: float = 0.0
+    prior_radius_rel: float = 0.10
+
+
     def _nearest_free_noncorner(
         self,
         H: int,

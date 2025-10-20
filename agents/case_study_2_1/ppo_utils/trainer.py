@@ -1,7 +1,25 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+trainer.py — Unified PPOTrainer for local, FedAvg/FedTrunc, and FedRL-prior modes.
+
+- Local / FedAvg / FedTrunc:
+    * Flat-vector helpers preserved: get_actor_flat/load_actor_flat, get_critic_flat/load_critic_flat
+    * Loaders accept either: (a) flat 1-D torch.Tensor, or (b) state_dict (with or without "actor."/ "critic." prefixes)
+    * reset_opt kwarg supported to clear optimizer state after cross-client swaps
+
+- FedRL-prior:
+    * Optional AE side-car remains (gated by cfg.enable_ae_aux)
+    * Stability probe metrics: param_drift_critic, out_drift_probe, prior_gap_probe, clamp_effect_probe
+      (all W&B-guarded and cheap; do nothing if W&B disabled)
+"""
+
+from typing import Dict, Any, Union, List
 import numpy as np
 import torch
 import wandb
-from typing import Dict, Any
+
+from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from .helpers import (
     compute_gae, to_tchw, ego_list_to_tchw, quantile_huber_loss,
@@ -10,6 +28,16 @@ from .helpers import (
 from .buffer import RolloutBuffer
 from eval.distributions import log_distributional_visuals_wandb
 from eval.metric_losses import run_eval_rollout
+
+# ---------- optional AE import (backwards compatible) ----------
+_HAS_AE = False
+_build_autoencoder = None
+try:
+    from models.fedrl_nets import build_autoencoder as _build_autoencoder  # type: ignore
+    _HAS_AE = True
+except Exception:
+    _HAS_AE = False
+    _build_autoencoder = None
 
 
 class PPOTrainer:
@@ -26,13 +54,19 @@ class PPOTrainer:
         self.client_id = client_id
         self.wb_step_base = int(wb_step_base)  # absolute step offset for monotonic W&B logging
 
+        # model to device
         self.model.actor.to(self.device)
         self.model.critic.to(self.device)
-        self.model.actor.set_exploration_eps(cfg.exploration_eps)
 
-        self.hidden_dim = self.model.actor.hidden_dim
+        # exploration (guard older actors)
+        if hasattr(self.model.actor, "set_exploration_eps"):
+            self.model.actor.set_exploration_eps(getattr(cfg, "exploration_eps", 0.0))
+
+        # hidden init
+        self.hidden_dim = getattr(self.model.actor, "hidden_dim", 0)
         self.h_actor = self.model.actor.init_hidden(self.env.cfg.n_agents, self.device)
 
+        # optimizers
         self.opt_actor, self.opt_critic = setup_optimizers(self.model, cfg)
 
         # reset and infer shapes
@@ -50,6 +84,18 @@ class PPOTrainer:
             hidden_dim=self.hidden_dim,
         )
 
+        # stability probe (safe/no-op if unused)
+        self._probe_glob: List[torch.Tensor] = []
+        self._probe_max = 64
+        self._prev_critic_vec: Union[torch.Tensor, None] = None
+        self._prev_probe_out: Union[torch.Tensor, None] = None
+
+        # seed a few probe states
+        with torch.no_grad():
+            for _ in range(min(8, self._probe_max)):
+                (a_obs_seed, c_obs_seed), _ = self.env.reset()
+                self._probe_glob.append(to_tchw(c_obs_seed).to(self.device))
+
         self.actor_obs = actor_obs
         self.critic_obs = critic_obs
 
@@ -57,26 +103,132 @@ class PPOTrainer:
         self.ep_returns: list[float] = []
         self.ep_len = 0
         self.ep_return = 0.0
-        self.next_eval = cfg.eval_every_steps
+        self.next_eval = getattr(cfg, "eval_every_steps", 0)
 
         self.is_dist = hasattr(self.model.critic, "taus")
+
+        # ---------- AE auxiliary (optional) ----------
+        self.ae_enabled = bool(getattr(cfg, "enable_ae_aux", False)) and _HAS_AE
+        self.encoder = None
+        self.decoder = None
+        self.opt_enc = None
+        self.opt_dec = None
+        self.ae_rec_lambda = float(getattr(self.cfg, "fedrl_rec_lambda", 1e-2))
+
+        if self.ae_enabled:
+            try:
+                d_latent = int(getattr(cfg, "fedrl_d_latent", 128))
+                ae = _build_autoencoder(in_ch=glob0.shape[0], d_latent=d_latent)  # type: ignore
+                self.encoder = ae.encoder.to(self.device)
+                self.decoder = ae.decoder.to(self.device)
+                self.opt_enc = torch.optim.Adam(self.encoder.parameters(), lr=float(getattr(cfg, "fedrl_enc_lr", 1e-3)))
+                self.opt_dec = torch.optim.Adam(self.decoder.parameters(), lr=float(getattr(cfg, "fedrl_dec_lr", 5e-4)))
+
+                # allow critic to consume spatial encoder if it supports it
+                if hasattr(self.model, "attach_spatial_encoder"):
+                    self.model.attach_spatial_encoder(self.encoder)
+                    self.model.critic.to(self.device)
+            except Exception:
+                # fallback clean disable
+                self.ae_enabled = False
+                self.encoder = None
+                self.decoder = None
+                self.opt_enc = None
+                self.opt_dec = None
+
+    # ---------- FedAvg / FedTrunc helpers: flat <-> params; also accept state_dicts ----------
+
+    def _normalize_sd_view(
+        self, module_prefix: str, sd: Dict[str, torch.Tensor]
+    ) -> Dict[str, torch.Tensor]:
+        """
+        Accept either full module state_dict or a flat dict with 'module_prefix.' keys;
+        return a state_dict keyed relative to the module (no prefix).
+        """
+        # Case A: keys already relative to the module (e.g., 'weight', 'bias' ...).
+        if all(('.' not in k) or (k.split('.')[0] not in ("actor", "critic")) for k in sd.keys()):
+            return sd
+
+        # Case B: flatten with 'actor.' / 'critic.' prefix
+        out: Dict[str, torch.Tensor] = {}
+        prefix = f"{module_prefix}."
+        for k, v in sd.items():
+            if k.startswith(prefix):
+                out[k[len(prefix):]] = v
+        if not out:
+            # If prefix not found, try to load as-is to surface an informative error upstream.
+            return sd
+        return out
+
+    def get_actor_flat(self, detach: bool = True, cpu: bool = True, **_kwargs) -> torch.Tensor:
+        params = [p for p in self.model.actor.parameters() if p.requires_grad]
+        if not params:
+            return torch.empty(0)
+        vec = parameters_to_vector([p.detach() if detach else p for p in params])
+        return vec.cpu() if cpu else vec
+
+    def load_actor_flat(
+        self,
+        flat_or_sd: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        strict: bool = True,
+        reset_opt: bool = False,
+        **_kwargs,
+    ) -> None:
+        if isinstance(flat_or_sd, dict):
+            sd = self._normalize_sd_view("actor", flat_or_sd)
+            self.model.actor.load_state_dict(sd, strict=strict)
+            self.model.actor.to(self.device)
+        else:
+            params = [p for p in self.model.actor.parameters() if p.requires_grad]
+            if not params:
+                return
+            expected = parameters_to_vector([p.detach() for p in params]).numel()
+            if strict and int(flat_or_sd.numel()) != int(expected):
+                raise RuntimeError(f"load_actor_flat: size mismatch {flat_or_sd.numel()} != {expected}")
+            vector_to_parameters(flat_or_sd.to(params[0].device, dtype=params[0].dtype), params)
+
+        if reset_opt and getattr(self, "opt_actor", None) is not None:
+            try:
+                self.opt_actor.state.clear()
+            except Exception:
+                self.opt_actor = type(self.opt_actor)(self.model.actor.parameters(), **self.opt_actor.defaults)
+
+    def get_critic_flat(self, detach: bool = True, cpu: bool = True, **_kwargs) -> torch.Tensor:
+        params = [p for p in self.model.critic.parameters() if p.requires_grad]
+        if not params:
+            return torch.empty(0)
+        vec = parameters_to_vector([p.detach() if detach else p for p in params])
+        return vec.cpu() if cpu else vec
+
+    def load_critic_flat(
+        self,
+        flat_or_sd: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        strict: bool = True,
+        reset_opt: bool = False,
+        **_kwargs,
+    ) -> None:
+        if isinstance(flat_or_sd, dict):
+            sd = self._normalize_sd_view("critic", flat_or_sd)
+            self.model.critic.load_state_dict(sd, strict=strict)
+            self.model.critic.to(self.device)
+        else:
+            params = [p for p in self.model.critic.parameters() if p.requires_grad]
+            if not params:
+                return
+            expected = parameters_to_vector([p.detach() for p in params]).numel()
+            if strict and int(flat_or_sd.numel()) != int(expected):
+                raise RuntimeError(f"load_critic_flat: size mismatch {flat_or_sd.numel()} != {expected}")
+            vector_to_parameters(flat_or_sd.to(params[0].device, dtype=params[0].dtype), params)
+
+        if reset_opt and getattr(self, "opt_critic", None) is not None:
+            try:
+                self.opt_critic.state.clear()
+            except Exception:
+                self.opt_critic = type(self.opt_critic)(self.model.critic.parameters(), **self.opt_critic.defaults)
 
     # --- absolute W&B step helper (monotonic across resumes) ---
     def _wb_step(self) -> int:
         return int(self.wb_step_base + self.total_env_steps)
-
-    # --- load broadcast critic (flat dict with "critic.*" keys) and optionally reset optimizer state
-    def load_critic_flat(self, flat_state: Dict[str, torch.Tensor], reset_opt: bool = True) -> None:
-        critic_sd: Dict[str, torch.Tensor] = {}
-        for k, v in flat_state.items():
-            if not k.startswith("critic."):
-                raise KeyError(f"unexpected non-critic key in flat_state: {k}")
-            critic_sd[k[len("critic."):]] = v
-        self.model.critic.load_state_dict(critic_sd, strict=True)
-        self.model.critic.to(self.device)
-        if reset_opt:
-            # preserve lr and hyperparams, but clear moments to avoid mismatch after FedAvg
-            self.opt_critic.state.clear()
 
     # --- train for a fixed number of epochs, honoring cfg.total_steps as early stop
     def train_for_epochs(self, n_epochs: int) -> int:
@@ -144,14 +296,15 @@ class PPOTrainer:
 
         if terminated or truncated:
             term_reason = info.get("terminated_by", "unknown")
-            wandb.log({
-                f"client{self.client_id}/ep/len": self.ep_len,
-                f"client{self.client_id}/ep/return_team": self.ep_return,
-                f"client{self.client_id}/ep/objects_delivered_total": int(info.get("objects_delivered_total", 0)),
-                f"client{self.client_id}/ep/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
-                f"client{self.client_id}/ep/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
-                f"client{self.client_id}/ep/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
-            }, step=self._wb_step())
+            if wandb.run is not None:
+                wandb.log({
+                    f"client{self.client_id}/ep/len": self.ep_len,
+                    f"client{self.client_id}/ep/return_team": self.ep_return,
+                    f"client{self.client_id}/ep/objects_delivered_total": int(info.get("objects_delivered_total", 0)),
+                    f"client{self.client_id}/ep/term/time_limit": 1.0 if term_reason == "time_limit" else 0.0,
+                    f"client{self.client_id}/ep/term/catastrophe": 1.0 if term_reason == "catastrophe" else 0.0,
+                    f"client{self.client_id}/ep/term/full_success": 1.0 if term_reason == "all_goals_and_objects" else 0.0,
+                }, step=self._wb_step())
 
             self.ep_returns.append(self.ep_return)
             self.h_actor = self.model.actor.init_hidden(self.n_agents, self.device)
@@ -159,14 +312,47 @@ class PPOTrainer:
             self.ep_return = 0.0
             self.ep_len = 0
 
+        # opportunistically top up probe buffer with latest critic observation
+        if len(self._probe_glob) < self._probe_max:
+            self._probe_glob.append(self.roll.glob[self.roll.ptr - 1].detach().to(self.device))
+
         return self.roll.full()
 
-    # ---------- value bootstrap, adv, ppo update ----------
+    # ---------- value bootstrap, adv, ppo update + optional AE auxiliary ----------
 
     def _bootstrap_last_value(self) -> float:
         glob_last = to_tchw(self.critic_obs).unsqueeze(0).to(self.device)
         last_v = self._forward_value(glob_last)
         return float(last_v.item())
+
+    def _ae_aux_step(self, glob_batch: torch.Tensor) -> float:
+        """
+        Trains the auxiliary AE only. Does not affect actor/critic gradients.
+        No-op (returns 0.0) if AE is disabled.
+        glob_batch: [T, C, H, W]
+        """
+        if not self.ae_enabled or self.encoder is None or self.decoder is None:
+            return 0.0
+        if glob_batch.numel() == 0:
+            return 0.0
+
+        mb = min(256, glob_batch.size(0))
+        idx = torch.randint(0, glob_batch.size(0), (mb,), device=glob_batch.device)
+        x = glob_batch[idx].to(self.device)          # [mb, C, H, W]
+        z = self.encoder(x)                          # [mb, spatial latent]
+        x_hat = self.decoder(z)                      # [mb, C, H, W]
+        rec_loss = torch.nn.functional.mse_loss(x_hat, x)
+
+        assert self.opt_enc is not None and self.opt_dec is not None
+        self.opt_enc.zero_grad(set_to_none=True)
+        self.opt_dec.zero_grad(set_to_none=True)
+        rec_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.encoder.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(self.decoder.parameters(), max_norm=1.0)
+        self.opt_enc.step()
+        self.opt_dec.step()
+
+        return float(rec_loss.item())
 
     def update_epoch(self) -> Dict[str, float]:
         last_v = self._bootstrap_last_value()
@@ -205,6 +391,11 @@ class PPOTrainer:
             quantile_huber_loss=quantile_huber_loss,
         )
 
+        # AE auxiliary step and logging (only if enabled)
+        rec_loss = self._ae_aux_step(glob_batch)
+        if self.ae_enabled and wandb.run is not None:
+            metrics[f"client{self.client_id}/ae/rec_mse"] = float(rec_loss)
+
         if self.is_dist:
             with torch.no_grad():
                 z_dbg = self.model.critic(glob_batch[: min(64, T)].to(self.device))
@@ -217,33 +408,98 @@ class PPOTrainer:
             f"client{self.client_id}/env/steps": self.total_env_steps,
         })
 
-        wandb.log(metrics, step=self._wb_step())
+        if wandb.run is not None:
+            wandb.log(metrics, step=self._wb_step())
 
-        if self.total_env_steps % self.cfg.log_interval == 0:
+        if self.total_env_steps % getattr(self.cfg, "log_interval", 1000) == 0:
             mean_ret = float(np.mean(self.ep_returns[-10:])) if self.ep_returns else 0.0
-            wandb.log({
-                f"client{self.client_id}/train/mean_ep_ret_10": mean_ret,
-                f"client{self.client_id}/train/last_v": float(last_v),
-                f"client{self.client_id}/env/episodes": len(self.ep_returns),
-            }, step=self._wb_step())
+            if wandb.run is not None:
+                wandb.log({
+                    f"client{self.client_id}/train/mean_ep_ret_10": mean_ret,
+                    f"client{self.client_id}/train/last_v": float(last_v),
+                    f"client{self.client_id}/env/episodes": len(self.ep_returns),
+                }, step=self._wb_step())
 
-            if self.is_dist:
-                glob_dbg = glob_batch[: min(128, glob_batch.size(0))]
-                log_distributional_visuals_wandb(
-                    glob_batch=glob_dbg,
-                    model=self.model,
-                    device=str(self.device),
-                    wb_step=self._wb_step(),
-                    split=f"train_client{self.client_id}",
-                    max_batch=128,
-                )
+                if self.is_dist:
+                    glob_dbg = glob_batch[: min(128, glob_batch.size(0))]
+                    log_distributional_visuals_wandb(
+                        glob_batch=glob_dbg,
+                        model=self.model,
+                        device=str(self.device),
+                        wb_step=self._wb_step(),
+                        split=f"train_client{self.client_id}",
+                        max_batch=128
+                    )
 
         self.roll.clear()
+
+        # --- stability metrics (cheap, W&B-guarded) ---
+        try:
+            # 1) parameter drift (critic)
+            vecs = []
+            for p in self.model.critic.parameters():
+                if p.requires_grad:
+                    vecs.append(p.detach().flatten().cpu())
+            cur_vec = torch.cat(vecs) if vecs else torch.empty(0)
+
+            if self._prev_critic_vec is not None and cur_vec.numel() == self._prev_critic_vec.numel():
+                param_drift = torch.norm(cur_vec - self._prev_critic_vec).item()
+            else:
+                param_drift = 0.0
+            self._prev_critic_vec = cur_vec
+
+            # 2-4) probe-based metrics
+            out_drift = prior_gap = clamp_effect = 0.0
+            if len(self._probe_glob) > 0:
+                xs_probe = torch.stack(self._probe_glob, dim=0).to(self.device)
+
+                with torch.no_grad():
+                    y_con = self.model.critic(xs_probe).detach().cpu()  # constrained forward (covers FedRL)
+                    # prior-only forward (if present)
+                    c = self.model.critic
+                    if hasattr(c, "v_prior"):
+                        z = c._encode(xs_probe)
+                        y_pri = c.v_prior(z).squeeze(-1).detach().cpu()
+                    elif hasattr(c, "head_prior"):
+                        z = c._encode(xs_probe)
+                        y_pri = c._squash(c.head_prior(z)).detach().cpu()
+                    else:
+                        y_pri = torch.zeros_like(y_con)
+
+                    # raw local (bypass affine+clamp), if possible
+                    if hasattr(c, "v"):
+                        z = c._encode(xs_probe)
+                        y_raw = c.v(z).squeeze(-1).detach().cpu()
+                    elif hasattr(c, "head"):
+                        z = c._encode(xs_probe)
+                        y_raw = c._squash(c.head(z)).detach().cpu()
+                    else:
+                        y_raw = y_con  # fallback
+
+                def mad(a, b):  # mean absolute difference
+                    return (a - b).abs().mean().item()
+
+                if self._prev_probe_out is not None and self._prev_probe_out.shape == y_con.shape:
+                    out_drift = mad(y_con, self._prev_probe_out)
+                self._prev_probe_out = y_con
+
+                prior_gap = mad(y_con, y_pri)
+                clamp_effect = mad(y_con, y_raw)
+
+            if wandb.run is not None:
+                wandb.log({
+                    f"client{self.client_id}/stab/param_drift_critic": float(param_drift),
+                    f"client{self.client_id}/stab/out_drift_probe": float(out_drift),
+                    f"client{self.client_id}/stab/prior_gap_probe": float(prior_gap),
+                    f"client{self.client_id}/stab/clamp_effect_probe": float(clamp_effect),
+                }, step=self._wb_step())
+        except Exception:
+            pass
+
         return metrics
 
-
     def maybe_eval(self) -> None:
-        if self.total_env_steps >= self.next_eval:
+        if self.next_eval and self.total_env_steps >= self.next_eval:
             eval_gif = f"outputs/eval/client_{self.client_id}_seed_{self.cfg.seed}_step_{self.total_env_steps}.gif"
             _ = run_eval_rollout(
                 self.env, self.model, self.device,
@@ -253,4 +509,4 @@ class PPOTrainer:
                 gif_path=eval_gif,
                 wb_step=self._wb_step(),
             )
-            self.next_eval += self.cfg.eval_every_steps
+            self.next_eval += getattr(self.cfg, "eval_every_steps", 0)
