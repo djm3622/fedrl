@@ -391,13 +391,73 @@ class PPOTrainer:
         return float(rec_loss.item())
 
     def update_epoch(self) -> Dict[str, float]:
-        last_v = self._bootstrap_last_value()
-        adv, ret = compute_gae(
-            self.roll, last_value=last_v,
+        # mean-baseline bootstrap and GAE (as before)
+        last_v_mean = self._bootstrap_last_value()
+        adv_mean, ret_mean = compute_gae(
+            self.roll, last_value=last_v_mean,
             gamma=self.cfg.gamma, lam=self.cfg.gae_lambda, device=str(self.device)
         )
-        adv = (adv - adv.mean()) / (adv.std(unbiased=False) + 1e-8)
+        adv_mean = (adv_mean - adv_mean.mean()) / (adv_mean.std(unbiased=False) + 1e-8)
 
+        # optionally compute CVaR-based GAE and mix with mean advantage
+        use_risk = bool(getattr(self.cfg, "risk_enable", False)) and self.is_dist
+        beta = float(getattr(self.cfg, "risk_beta", 0.0))          # 0.0 -> pure mean; 1.0 -> pure CVaR
+        alpha = float(getattr(self.cfg, "cvar_alpha", 0.10))       # tail level
+
+        def _gae_from_values(rew_b, done_b, v_seq, last_v, gamma, lam):
+            # rew_b, done_b: [T], v_seq: [T] values at times 0..T-1, last_v: scalar for T
+            T = v_seq.shape[0]
+            adv = torch.zeros_like(v_seq)
+            gae = 0.0
+            for t in reversed(range(T)):
+                next_v = last_v if t == T - 1 else v_seq[t + 1]
+                delta = rew_b[t] + gamma * next_v * (1.0 - done_b[t]) - v_seq[t]
+                gae = delta + gamma * lam * (1.0 - done_b[t]) * gae
+                adv[t] = gae
+            ret = adv + v_seq
+            return adv, ret
+
+        adv_mix = adv_mean
+        v_cvar_mb = None
+        mean_minus_cvar_mb = None
+
+        if use_risk and beta > 0.0:
+            # compute per-step CVaR values for the same glob_batch used below
+            T = self.roll.ptr
+            glob_batch = self.roll.glob[:T].to(self.device)
+
+            with torch.no_grad():
+                z = self.model.critic(glob_batch)               # [T, Nq]
+                Nq = z.size(-1)
+                k = max(1, int(alpha * Nq))
+                v_mean_seq = z.mean(dim=-1)                     # [T]
+                v_cvar_seq = z[:, :k].mean(dim=-1)              # [T]
+
+                # CVaR bootstrap at the last state
+                glob_last = to_tchw(self.critic_obs).unsqueeze(0).to(self.device)
+                z_last = self.model.critic(glob_last)           # [1, Nq]
+                last_v_cvar = z_last[:, :k].mean(dim=-1).item() # scalar
+
+            # correct names from your RolloutBuffer
+            rew_b  = self.roll.rewards[:T].to(self.device)   # shape [T]
+            done_b = self.roll.dones[:T].to(self.device)     # shape [T]
+
+            # CVaR-GAE using the CVaR value sequence
+            adv_cvar, ret_cvar = _gae_from_values(
+                rew_b=rew_b, done_b=done_b,
+                v_seq=v_cvar_seq, last_v=last_v_cvar,
+                gamma=self.cfg.gamma, lam=self.cfg.gae_lambda
+            )
+
+            # standardize and mix with mean-advantage
+            adv_cvar = (adv_cvar - adv_cvar.mean()) / (adv_cvar.std(unbiased=False) + 1e-8)
+            adv_mix  = (1.0 - beta) * adv_mean.to(self.device) + beta * adv_cvar
+
+            # for logging
+            v_cvar_mb = float(v_cvar_seq.mean().item())
+            mean_minus_cvar_mb = float((v_mean_seq - v_cvar_seq).mean().item())
+
+        # set up tensors for PPO update (unchanged)
         T = self.roll.ptr
         h_flat = self.roll.h_actor[:T].reshape(T * self.n_agents, self.hidden_dim)
         logp_flat = self.roll.logprobs[:T].reshape(T * self.n_agents)
@@ -408,14 +468,15 @@ class PPOTrainer:
         glob_batch = self.roll.glob[:T]
         values_old = self.roll.values[:T].detach()
 
+        # call your existing PPO update, but feed the mixed advantage
         metrics = ppo_epoch_update(
             cfg=self.cfg,
             model=self.model,
             opt_actor=self.opt_actor,
             opt_critic=self.opt_critic,
             roll=self.roll,
-            adv=adv,
-            ret=ret,
+            adv=adv_mix.detach(),              # <-- the only change that affects actor gradients
+            ret=ret_mean,                      # critic target remains mean-return; keep quantile Huber inside
             ego_flat=ego_flat,
             agent_ids_flat=agent_ids_flat,
             h_flat=h_flat,
@@ -427,11 +488,21 @@ class PPOTrainer:
             quantile_huber_loss=quantile_huber_loss,
         )
 
-        # AE auxiliary step and logging (only if enabled)
+        # optional logging
+        if wandb.run is not None:
+            metrics[f"client{self.client_id}/risk/beta"] = beta
+            metrics[f"client{self.client_id}/risk/alpha"] = alpha
+            if v_cvar_mb is not None:
+                metrics[f"client{self.client_id}/critic/v_cvar_mb"] = v_cvar_mb
+            if mean_minus_cvar_mb is not None:
+                metrics[f"client{self.client_id}/critic/mean_minus_cvar_mb"] = mean_minus_cvar_mb
+
+        # AE auxiliary (unchanged)
         rec_loss = self._ae_aux_step(glob_batch)
         if self.ae_enabled and wandb.run is not None:
             metrics[f"client{self.client_id}/ae/rec_mse"] = float(rec_loss)
 
+        # quick distributional debug (unchanged)
         if self.is_dist:
             with torch.no_grad():
                 z_dbg = self.model.critic(glob_batch[: min(64, T)].to(self.device))
@@ -452,10 +523,9 @@ class PPOTrainer:
             if wandb.run is not None:
                 wandb.log({
                     f"client{self.client_id}/train/mean_ep_ret_10": mean_ret,
-                    f"client{self.client_id}/train/last_v": float(last_v),
+                    f"client{self.client_id}/train/last_v": float(last_v_mean),
                     f"client{self.client_id}/env/episodes": len(self.ep_returns),
                 }, step=self._wb_step())
-
                 if self.is_dist:
                     glob_dbg = glob_batch[: min(128, glob_batch.size(0))]
                     log_distributional_visuals_wandb(
@@ -527,8 +597,8 @@ class PPOTrainer:
         except Exception as _e:
             print(f"[Client {self.client_id}] Stability probe failed: {_e}")
 
-
         return metrics
+
 
     def maybe_eval(self) -> None:
         if self.next_eval and self.total_env_steps >= self.next_eval:

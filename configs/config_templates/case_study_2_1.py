@@ -95,6 +95,10 @@ class MultiAgentGridConfig:
     mean_anchor_coef: float = 0.1
     exploration_eps: float = 0.05
 
+    risk_enable: bool = True         # turn on risk-aware mixing
+    risk_beta: float = 0.2            # 0.0..1.0 trade-off (performance vs safety)
+    cvar_alpha: float = 0.10          # tail level for CVaR
+
     # federation
     num_communication_rounds: int = 1
     local_epochs_per_round: int = 1
@@ -114,7 +118,6 @@ class MultiAgentGridConfig:
     prior_beta: float = 1.0
     prior_radius_abs: float = 0.0
     prior_radius_rel: float = 0.10
-
 
     def _nearest_free_noncorner(
         self,
