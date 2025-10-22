@@ -72,22 +72,6 @@ def _weighted_average_state(states: List[Tuple[Dict[str, torch.Tensor], float]])
     return acc
 
 
-# ---------- minimal, safe W&B init for server ----------
-
-def _server_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str | None):
-    if not os.getenv("WANDB_API_KEY", ""):
-        os.environ.setdefault("WANDB_MODE", "offline")
-    # stable id + resume so the server doesn't spawn new runs
-    return wandb.init(
-        project=project,
-        name=name + "_fedtrunc",
-        id=name + "_fedtrunc",
-        resume="allow",
-        config=cfg_dict,
-        group=group,
-    )
-
-
 class FedTruncServer:
     def __init__(self, cfg: Any, model_builder, device: str = "cuda:0"):
         """
@@ -101,12 +85,20 @@ class FedTruncServer:
         self.round_idx = 0
         self._wb_step_counter = 0
 
-        self.run = _server_wandb_safe_init(
-            project=cfg.wandb_project,
-            name=cfg.wandb_run_name,
-            cfg_dict=asdict(cfg),
-            group=getattr(cfg, "wandb_group", None),
-        )
+        self.run = None
+        try:
+            if getattr(cfg, "wandb_project", None):
+                self.run = wandb.init(
+                    project=cfg.wandb_project,
+                    name=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedtrunc_server",
+                    id=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedtrunc_server",
+                    resume="allow",
+                    config=asdict(cfg),
+                    group=getattr(cfg, "wandb_group", None),
+                    settings=wandb.Settings(start_method="thread"),
+                )
+        except Exception:
+            self.run = None
 
     def _wb_step(self) -> int:
         self._wb_step_counter += 1

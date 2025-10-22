@@ -74,8 +74,8 @@ class FedRLServer:
             if getattr(cfg, "wandb_project", None):
                 self.run = wandb.init(
                     project=cfg.wandb_project,
-                    name=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedrl_critic_server",
-                    id=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedrl_critic_server",
+                    name=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedrl_server",
+                    id=f"{getattr(cfg, 'wandb_run_name', 'run')}_fedrl_server",
                     resume="allow",
                     config=asdict(cfg),
                     group=getattr(cfg, "wandb_group", None),
