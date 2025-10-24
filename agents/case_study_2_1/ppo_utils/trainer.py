@@ -605,7 +605,7 @@ class PPOTrainer:
             eval_gif = f"outputs/eval/client_{self.client_id}_seed_{self.cfg.seed}_step_{self.total_env_steps}.gif"
             _ = run_eval_rollout(
                 self.env, self.model, self.device,
-                deterministic=False,
+                deterministic=True,
                 record=True,
                 log_wandb=True,
                 gif_path=eval_gif,

@@ -59,7 +59,7 @@ def _client_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str 
             id=run_id,
             resume="allow",
             config=cfg_dict,
-            group=(group if group is not None else f"{name}_fedrl_critic"),
+            group=(group if group is not None else f"{name}_fedrl"),
             dir=run_dir,
             settings=settings,
         )

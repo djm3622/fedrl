@@ -15,7 +15,7 @@ train:
   lr_critic: 0.0002
   critic_weight_decay: 0.0
   qr_kappa: 1.0
-  n_quantiles: 21
+  n_quantiles: 51
   mean_anchor_coef: 0.1
   exploration_eps: 0.05
 
@@ -25,17 +25,17 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_v21"
+  wandb_run_name: "case_study_1_2_distributional_v26"
   wandb_mode: "online"
   log_video: false
 
   param_type: "distributional"
   risk_enable: true         # turn on risk-aware mixing
-  risk_beta: 0.2            # 0.0..1.0 trade-off (performance vs safety)
-  cvar_alpha: 0.10          # tail level for CVaR
+  risk_beta: 0.4            # 0.0..1.0 trade-off (performance vs safety)
+  cvar_alpha: 0.05          # tail level for CVaR
 
   # federation
-  num_communication_rounds: 60
+  num_communication_rounds: 90
   local_epochs_per_round: 40
   n_clients: 6
   client_weights: [0.20, 0.19, 0.17, 0.16, 0.15, 0.13]
@@ -59,7 +59,7 @@ env:
 
   step_cost: -0.1
   goal_reward: 100.0
-  catastrophe_reward: -120.0
+  catastrophe_reward: -300.0
 
   invalid_move_penalty: -0.1
   max_steps: 120
