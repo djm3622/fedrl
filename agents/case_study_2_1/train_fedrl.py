@@ -49,7 +49,7 @@ def _spread_value(center: float, delta: float, rank: int, n_clients: int) -> flo
 def _client_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str | None, rank: int):
     if not os.getenv("WANDB_API_KEY", ""):
         os.environ.setdefault("WANDB_MODE", "offline")
-    base_name = f"{name}_fedrl_critic_client{rank}"
+    base_name = f"{name}_fedrl_client{rank}"
     run_id = base_name
     run_dir = os.path.join(
         os.getenv("SLURM_TMPDIR", os.path.join(os.getcwd(), "wandb_cache")),

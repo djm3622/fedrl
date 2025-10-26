@@ -71,8 +71,8 @@ def _server_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str 
     # Use stable id + resume to avoid spawning extra runs
     return wandb.init(
         project=project,
-        name=name + "_server",
-        id=name + "_server",
+        name=name + "_fedavg_server",
+        id=name + "_fedavg_server",
         resume="allow",
         config=cfg_dict,
         group=group,
