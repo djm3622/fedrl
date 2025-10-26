@@ -40,6 +40,11 @@ def _set_threads_per_proc(intra: int, inter: int = 1, blas_threads: int = 1):
     torch.set_num_threads(intra)
     torch.set_num_interop_threads(inter)
 
+def _spread_value(center: float, delta: float, rank: int, n_clients: int) -> float:
+    if n_clients <= 1 or delta <= 0:
+        return float(center)
+    t = rank / (n_clients - 1)
+    return float(max(0.0, min(1.0, (center - delta) + (2.0 * delta) * t)))
 
 def _client_wandb_safe_init(project: str, name: str, cfg_dict: dict, group: str | None, rank: int):
     if not os.getenv("WANDB_API_KEY", ""):
@@ -82,12 +87,15 @@ def _compute_epochs_per_client(local_epochs_per_round: int, n_clients: int, weig
 
 
 # ---------------- Client loop ----------------
-def _client_loop(rank: int,
-                 base_cfg: Any,
-                 threads_per_client: int,
-                 gpu_device: str,
-                 cmd_q: mp.Queue,
-                 rep_q: mp.Queue):
+def _client_loop(
+    rank: int,
+    base_cfg: Any,
+    n_clients: int,
+    threads_per_client: int,
+    gpu_device: str,
+    cmd_q: mp.Queue,
+    rep_q: mp.Queue
+):
     """
     Simple command loop:
       - 'broadcast': receive averaged critic sd and set it as the prior (no weight overwrite)
@@ -102,6 +110,13 @@ def _client_loop(rank: int,
         cfg.seed = int(base_cfg.seed) + int(rank)
         cfg.client_id = rank
         cfg.device = gpu_device
+        cfg.n_clients = n_clients
+
+        # per-client deterministic variations
+        hazard_delta = float(os.getenv("HAZARD_DELTA", "0.05"))
+        slip_delta   = float(os.getenv("SLIP_DELTA",   "0.02"))
+        cfg.hazard_prob = _spread_value(base_cfg.hazard_prob, hazard_delta, rank, n_clients)
+        cfg.slip_prob   = _spread_value(base_cfg.slip_prob,   slip_delta,   rank, n_clients)
 
         # force ae off on clients
         setattr(cfg, "enable_ae_aux", False)
@@ -207,7 +222,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
     for rank in range(n_clients):
         cq = ctx.Queue()
         rq = ctx.Queue()
-        p = ctx.Process(target=_client_loop, args=(rank, cfg, threads_per_client, device, cq, rq))
+        p = ctx.Process(target=_client_loop, args=(rank, cfg, n_clients, threads_per_client, device, cq, rq))
         p.daemon = False
         p.start()
         cmd_queues.append(cq)

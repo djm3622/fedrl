@@ -17,7 +17,7 @@ train:
   qr_kappa: 1.0
   n_quantiles: 51
   mean_anchor_coef: 0.1
-  exploration_eps: 0.05
+  exploration_eps: 0.03
 
   max_grad_norm: 0.5
   seed: 0
@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_v26"
+  wandb_run_name: "case_study_1_2_distributional_v32"
   wandb_mode: "online"
   log_video: false
 
@@ -54,7 +54,7 @@ env:
   hazard_zone_bounds: [3, 4, 5, 5]
   hazard_zone_cells: null
 
-  hazard_prob: 0.20
+  hazard_prob: 0.40
   hazard_loss: 120.0
 
   step_cost: -0.1
@@ -65,7 +65,7 @@ env:
   max_steps: 120
 
   n_agents: 3
-  slip_prob: 0.05
+  slip_prob: 0.15
   sample_active_hazard_each_episode: false
   block_on_collision: true
 
@@ -95,8 +95,8 @@ fedrl:
   fedrl_rec_lambda: 1.0e-2     # not used in the loss, only kept for compatibility
   fedrl_latent_hw: 5
 
-  prior_enabled: true
-  prior_alpha: 0.5
-  prior_beta: 1.0
-  prior_radius_abs: 0
-  prior_radius_rel: 0.20
+  enabled: true
+  alpha: 0.7
+  beta: 1.0
+  radius_abs: 0
+  radius_rel: 0.25
