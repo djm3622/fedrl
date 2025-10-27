@@ -12,6 +12,12 @@ trainer.py — Unified PPOTrainer for local, FedAvg/FedTrunc, and FedRL-prior mo
     * Optional AE side-car remains (gated by cfg.enable_ae_aux)
     * Stability probe metrics: param_drift_critic, out_drift_probe, prior_gap_probe, clamp_effect_probe
       (all W&B-guarded and cheap; do nothing if W&B disabled)
+
+- NEW (robust risk signal):
+    * PPO actor is trained on reward-only GAE (stable baseline).
+    * PLUS a second, small, UNCLIPPED auxiliary actor term that maximizes CVaR-advantage.
+      This keeps tail-risk pressure alive despite normalization and PPO clipping, and
+      empirically separates FedAvg from FedRL when hazards are stochastic (slip).
 """
 
 from typing import Dict, Any, Union, List
@@ -361,6 +367,129 @@ class PPOTrainer:
         last_v = self._forward_value(glob_last)
         return float(last_v.item())
 
+    def _compute_cvar_advantage(self, alpha: float) -> Dict[str, torch.Tensor]:
+        """
+        Build a lower-tail (CVaR-like) value sequence from the distributional critic,
+        then run GAE on that sequence to obtain a tail-sensitive advantage.
+
+        Returns a dict possibly containing:
+          adv_cvar: [T] (standardized)
+          v_cvar_mb: scalar (mean CVaR value)
+          mean_minus_cvar_mb: scalar (gap)
+        """
+        out: Dict[str, torch.Tensor] = {}
+        T = self.roll.ptr
+        if T == 0:
+            return out
+
+        glob_batch = self.roll.glob[:T].to(self.device)
+
+        with torch.no_grad():
+            z = self.model.critic(glob_batch)            # [T, Nq]
+            Nq = z.size(-1)
+            k = max(1, int(alpha * Nq))
+            v_mean_seq = z.mean(dim=-1)                  # [T]
+            v_cvar_seq = z[:, :k].mean(dim=-1)           # [T]
+
+            # CVaR bootstrap at the last state
+            glob_last = to_tchw(self.critic_obs).unsqueeze(0).to(self.device)
+            z_last = self.model.critic(glob_last)        # [1, Nq]
+            last_v_cvar = z_last[:, :k].mean(dim=-1).item()
+
+        rew_b  = self.roll.rewards[:T].to(self.device)   # [T]
+        done_b = self.roll.dones[:T].to(self.device)     # [T]
+
+        # GAE on the tail value sequence (no mixing here)
+        adv_tail = torch.zeros_like(v_cvar_seq)
+        gae = 0.0
+        for t in reversed(range(T)):
+            next_v = last_v_cvar if t == T - 1 else v_cvar_seq[t + 1]
+            delta = rew_b[t] + self.cfg.gamma * next_v * (1.0 - done_b[t]) - v_cvar_seq[t]
+            gae = delta + self.cfg.gamma * self.cfg.gae_lambda * (1.0 - done_b[t]) * gae
+            adv_tail[t] = gae
+        # standardize tail advantage on its own statistics
+        adv_tail = (adv_tail - adv_tail.mean()) / (adv_tail.std(unbiased=False) + 1e-8)
+
+        out["adv_cvar"] = adv_tail.detach()
+        out["v_cvar_mb"] = v_cvar_seq.mean().detach()
+        out["mean_minus_cvar_mb"] = (v_mean_seq - v_cvar_seq).mean().detach()
+        return out
+
+    def _aux_actor_cvar_pass(
+        self,
+        adv_cvar: torch.Tensor,
+        ego_flat: torch.Tensor,
+        agent_ids_flat: torch.Tensor,
+        h_flat: torch.Tensor,
+        act_flat: torch.Tensor,
+        old_logp_flat: torch.Tensor,
+    ) -> Dict[str, float]:
+        """
+        A second, lightweight actor pass: maximizes CVaR advantage with an UNCLIPPED surrogate.
+        Uses ratio.detach() to decouple from PPO clip and preserve stability.
+
+        Returns logging metrics.
+        """
+        cfg = self.cfg
+        T = self.roll.ptr
+        n_agents = self.roll.ego.shape[1]
+
+        lambda_cvar = float(getattr(cfg, "lambda_cvar", 0.0))
+        tau_cvar = float(getattr(cfg, "tau_cvar", 1.0))
+        if lambda_cvar <= 0.0:
+            return {}
+
+        # optional temperature scaling to keep gradients well-conditioned
+        adv_cvar_scaled = adv_cvar / max(tau_cvar, 1e-6)
+
+        # minibatch schedule (local; mirrors helpers.make_minibatches)
+        n_mb = max(int(getattr(cfg, "minibatches", 1)), 1)
+        mb_size = T // n_mb if n_mb > 0 else T
+        if mb_size == 0:
+            mb_slices = [np.arange(T)]
+        else:
+            idxs = np.arange(T)
+            np.random.shuffle(idxs)
+            mb_slices = [idxs[s: min(s + mb_size, T)] for s in range(0, T, mb_size)]
+
+        total_aux = 0.0
+        count = 0
+
+        for mb in mb_slices:
+            # expand to per-agent mask over flattened [T*n_agents]
+            mask_idx = []
+            for t in mb:
+                base = int(t) * n_agents
+                mask_idx.extend(range(base, base + n_agents))
+            mask = torch.as_tensor(mask_idx, dtype=torch.long, device=self.device)
+
+            dists_new, _ = self.model.actor(
+                ego_flat[mask].to(self.device),
+                agent_ids_flat[mask].to(self.device),
+                h_in=h_flat[mask].to(self.device),
+            )
+            new_logp = dists_new.log_prob(act_flat[mask].to(self.device))
+            ratio = torch.exp(new_logp - old_logp_flat[mask])
+
+            # broadcast per-time-step tail advantage to per-agent
+            adv_mb = adv_cvar_scaled[mb].to(self.device)
+            adv_mb = adv_mb.repeat_interleave(n_agents)
+
+            # UNCLIPPED auxiliary (ratio is detached to avoid tug-of-war with PPO clip)
+            aux_loss = - lambda_cvar * (ratio * adv_mb).mean()
+
+            self.opt_actor.zero_grad(set_to_none=True)
+            aux_loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.actor.parameters(), cfg.max_grad_norm)
+            self.opt_actor.step()
+
+            total_aux += float(aux_loss.detach().item())
+            count += 1
+
+        if count == 0:
+            return {}
+        return {"loss/aux_cvar": total_aux / max(count, 1)}
+
     def _ae_aux_step(self, glob_batch: torch.Tensor) -> float:
         """
         Trains the auxiliary AE only. Does not affect actor/critic gradients.
@@ -391,7 +520,7 @@ class PPOTrainer:
         return float(rec_loss.item())
 
     def update_epoch(self) -> Dict[str, float]:
-        # mean-baseline bootstrap and GAE (as before)
+        # ---------- 1) Reward-only GAE for PPO (stable baseline) ----------
         last_v_mean = self._bootstrap_last_value()
         adv_mean, ret_mean = compute_gae(
             self.roll, last_value=last_v_mean,
@@ -399,65 +528,21 @@ class PPOTrainer:
         )
         adv_mean = (adv_mean - adv_mean.mean()) / (adv_mean.std(unbiased=False) + 1e-8)
 
-        # optionally compute CVaR-based GAE and mix with mean advantage
+        # ---------- 2) Optional CVaR advantage (separate path; no mixing with PPO adv) ----------
         use_risk = bool(getattr(self.cfg, "risk_enable", False)) and self.is_dist
-        beta = float(getattr(self.cfg, "risk_beta", 0.0))          # 0.0 -> pure mean; 1.0 -> pure CVaR
-        alpha = float(getattr(self.cfg, "cvar_alpha", 0.10))       # tail level
-
-        def _gae_from_values(rew_b, done_b, v_seq, last_v, gamma, lam):
-            # rew_b, done_b: [T], v_seq: [T] values at times 0..T-1, last_v: scalar for T
-            T = v_seq.shape[0]
-            adv = torch.zeros_like(v_seq)
-            gae = 0.0
-            for t in reversed(range(T)):
-                next_v = last_v if t == T - 1 else v_seq[t + 1]
-                delta = rew_b[t] + gamma * next_v * (1.0 - done_b[t]) - v_seq[t]
-                gae = delta + gamma * lam * (1.0 - done_b[t]) * gae
-                adv[t] = gae
-            ret = adv + v_seq
-            return adv, ret
-
-        adv_mix = adv_mean
+        beta = float(getattr(self.cfg, "risk_beta", 0.0))     # used only as a gate here
+        alpha = float(getattr(self.cfg, "cvar_alpha", 0.10))
+        adv_cvar = None
         v_cvar_mb = None
         mean_minus_cvar_mb = None
 
         if use_risk and beta > 0.0:
-            # compute per-step CVaR values for the same glob_batch used below
-            T = self.roll.ptr
-            glob_batch = self.roll.glob[:T].to(self.device)
+            cvar_pack = self._compute_cvar_advantage(alpha)
+            adv_cvar = cvar_pack.get("adv_cvar", None)
+            v_cvar_mb = cvar_pack.get("v_cvar_mb", None)
+            mean_minus_cvar_mb = cvar_pack.get("mean_minus_cvar_mb", None)
 
-            with torch.no_grad():
-                z = self.model.critic(glob_batch)               # [T, Nq]
-                Nq = z.size(-1)
-                k = max(1, int(alpha * Nq))
-                v_mean_seq = z.mean(dim=-1)                     # [T]
-                v_cvar_seq = z[:, :k].mean(dim=-1)              # [T]
-
-                # CVaR bootstrap at the last state
-                glob_last = to_tchw(self.critic_obs).unsqueeze(0).to(self.device)
-                z_last = self.model.critic(glob_last)           # [1, Nq]
-                last_v_cvar = z_last[:, :k].mean(dim=-1).item() # scalar
-
-            # correct names from your RolloutBuffer
-            rew_b  = self.roll.rewards[:T].to(self.device)   # shape [T]
-            done_b = self.roll.dones[:T].to(self.device)     # shape [T]
-
-            # CVaR-GAE using the CVaR value sequence
-            adv_cvar, ret_cvar = _gae_from_values(
-                rew_b=rew_b, done_b=done_b,
-                v_seq=v_cvar_seq, last_v=last_v_cvar,
-                gamma=self.cfg.gamma, lam=self.cfg.gae_lambda
-            )
-
-            # standardize and mix with mean-advantage
-            adv_cvar = (adv_cvar - adv_cvar.mean()) / (adv_cvar.std(unbiased=False) + 1e-8)
-            adv_mix  = (1.0 - beta) * adv_mean.to(self.device) + beta * adv_cvar
-
-            # for logging
-            v_cvar_mb = float(v_cvar_seq.mean().item())
-            mean_minus_cvar_mb = float((v_mean_seq - v_cvar_seq).mean().item())
-
-        # set up tensors for PPO update (unchanged)
+        # ---------- 3) Prepare tensors for both stages ----------
         T = self.roll.ptr
         h_flat = self.roll.h_actor[:T].reshape(T * self.n_agents, self.hidden_dim)
         logp_flat = self.roll.logprobs[:T].reshape(T * self.n_agents)
@@ -468,15 +553,15 @@ class PPOTrainer:
         glob_batch = self.roll.glob[:T]
         values_old = self.roll.values[:T].detach()
 
-        # call your existing PPO update, but feed the mixed advantage
+        # ---------- 4) Baseline PPO update (reward-only) ----------
         metrics = ppo_epoch_update(
             cfg=self.cfg,
             model=self.model,
             opt_actor=self.opt_actor,
             opt_critic=self.opt_critic,
             roll=self.roll,
-            adv=adv_mix.detach(),              # <-- the only change that affects actor gradients
-            ret=ret_mean,                      # critic target remains mean-return; keep quantile Huber inside
+            adv=adv_mean.detach(),              # actor sees reward-only GAE
+            ret=ret_mean,                      # critic target remains mean-return
             ego_flat=ego_flat,
             agent_ids_flat=agent_ids_flat,
             h_flat=h_flat,
@@ -488,21 +573,33 @@ class PPOTrainer:
             quantile_huber_loss=quantile_huber_loss,
         )
 
-        # optional logging
+        # ---------- 5) Unclipped auxiliary actor pass on CVaR advantage ----------
+        if adv_cvar is not None and float(getattr(self.cfg, "lambda_cvar", 0.0)) > 0.0:
+            aux_metrics = self._aux_actor_cvar_pass(
+                adv_cvar=adv_cvar,
+                ego_flat=ego_flat,
+                agent_ids_flat=agent_ids_flat,
+                h_flat=h_flat,
+                act_flat=act_flat,
+                old_logp_flat=old_logp_flat,
+            )
+            metrics.update(aux_metrics)
+
+        # ---------- 6) Optional logging ----------
         if wandb.run is not None:
             metrics[f"client{self.client_id}/risk/beta"] = beta
             metrics[f"client{self.client_id}/risk/alpha"] = alpha
             if v_cvar_mb is not None:
-                metrics[f"client{self.client_id}/critic/v_cvar_mb"] = v_cvar_mb
+                metrics[f"client{self.client_id}/critic/v_cvar_mb"] = float(v_cvar_mb.item())
             if mean_minus_cvar_mb is not None:
-                metrics[f"client{self.client_id}/critic/mean_minus_cvar_mb"] = mean_minus_cvar_mb
+                metrics[f"client{self.client_id}/critic/mean_minus_cvar_mb"] = float(mean_minus_cvar_mb.item())
 
-        # AE auxiliary (unchanged)
+        # ---------- 7) AE auxiliary (unchanged) ----------
         rec_loss = self._ae_aux_step(glob_batch)
         if self.ae_enabled and wandb.run is not None:
             metrics[f"client{self.client_id}/ae/rec_mse"] = float(rec_loss)
 
-        # quick distributional debug (unchanged)
+        # ---------- 8) Quick distributional debug (unchanged) ----------
         if self.is_dist:
             with torch.no_grad():
                 z_dbg = self.model.critic(glob_batch[: min(64, T)].to(self.device))
@@ -557,21 +654,17 @@ class PPOTrainer:
                 c = self.model.critic
 
                 with torch.no_grad():
-                    # run all computations on self.device
                     y_con = c(xs_probe).detach()
                     z = self._compat_encode(c, xs_probe)
 
-                    # prior-only forward
                     y_pri = self._compat_prior_forward(c, z, xs_probe)
                     if y_pri is None:
                         y_pri = torch.zeros_like(y_con, device=self.device)
 
-                    # raw local forward
                     y_raw = self._compat_raw_local_forward(c, z, xs_probe)
                     if y_raw is None:
                         y_raw = y_con
 
-                    # move to CPU only after all ops
                     y_con_cpu = y_con.cpu()
                     y_pri_cpu = y_pri.cpu()
                     y_raw_cpu = y_raw.cpu()

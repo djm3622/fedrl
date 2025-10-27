@@ -25,14 +25,16 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_v32"
+  wandb_run_name: "case_study_1_2_distributional_v33"
   wandb_mode: "online"
   log_video: false
 
   param_type: "distributional"
   risk_enable: true         # turn on risk-aware mixing
-  risk_beta: 0.4            # 0.0..1.0 trade-off (performance vs safety)
-  cvar_alpha: 0.05          # tail level for CVaR
+  risk_beta: 0.1            # acts as a gate here (any >0 enables tail computation)
+  cvar_alpha: 0.10
+  lambda_cvar: 0.02     # try 0.02–0.05
+  tau_cvar: 1.5         # optional temperature, 1.0–2.0
 
   # federation
   num_communication_rounds: 90
