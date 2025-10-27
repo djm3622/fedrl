@@ -1,5 +1,5 @@
 train:
-  device: "cuda"
+  device: "mps"
   total_steps: 10000000
   rollout_len: 1024
   update_epochs: 4
@@ -90,7 +90,7 @@ env:
   allow_objects_stack_on_object_goal: true
 
 fedrl:
-  enable_ae_aux: false          # must be true to run and log AE
+  enable_ae_aux: false         # must be true to run and log AE
   fedrl_d_latent: 128          # optional; default 128
   fedrl_enc_lr: 1.0e-3         # optional
   fedrl_dec_lr: 5.0e-4         # optional
@@ -98,7 +98,10 @@ fedrl:
   fedrl_latent_hw: 5
 
   enabled: true
-  alpha: 0.7
+  alpha: 0.5
   beta: 1.0
   radius_abs: 0
-  radius_rel: 0.25
+  radius_rel: 0.20
+
+  agg_hazard_eps: 1.0e-3   # denominator epsilon in 1/(eps + hazard)
+  agg_w_max: 30.0          # cap on any single client's weight; set 0.0 to disable

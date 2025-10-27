@@ -184,7 +184,11 @@ def _client_loop(
                     except Exception:
                         crit_state = None
 
-                rep_q.put({"rank": rank, "critic_state": crit_state})
+                rep_q.put({
+                    "rank": rank,
+                    "critic_state": crit_state,
+                    "metrics": trainer.get_round_metrics(reset=True),  # hazard_rate etc.
+                })
             else:
                 continue
 
@@ -243,15 +247,30 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         for rank in range(n_clients):
             cmd_queues[rank].put({"cmd": "train_round", "epochs": int(epochs_per_client[rank])})
 
-        # Gather critics and aggregate with normalized weights
-        crit_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]] = []
+        # Gather critics + metrics from clients
+        raw_msgs: List[Dict[str, Any]] = []
         for rank in range(n_clients):
             msg = rep_queues[rank].get()
             if "error" in msg:
                 raise RuntimeError(f"client {rank} failed: {msg['error']}")
-            crit_states.append((msg.get("critic_state", None), float(w[rank])))
+            raw_msgs.append(msg)
 
-        server.aggregate_and_refit(critic_states=crit_states)
+        # Build hazard_metrics aligned with client messages
+        hazard_metrics: List[Optional[float]] = []
+        for msg in raw_msgs:
+            m = msg.get("metrics", {}) or {}
+            hazard_metrics.append(float(m.get("hazard_rate", 0.0)))
+
+        # Package critic states (weights here are dummies; server will ignore when hazard_metrics is provided)
+        crit_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]] = []
+        for msg in raw_msgs:
+            crit_states.append((msg.get("critic_state", None), 1.0))
+
+        # Aggregate with hazard-weighted prior (critic only)
+        server.aggregate_and_refit(
+            critic_states=crit_states,
+            hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
+        )
 
         # Broadcast the averaged critic back out (as prior only)
         pkg = server.package_broadcast()

@@ -119,6 +119,9 @@ class MultiAgentGridConfig:
     prior_radius_abs: float = 0.0
     prior_radius_rel: float = 0.10
 
+    agg_hazard_eps: float = 1e-3
+    agg_w_max: float = 10.0
+
     def _nearest_free_noncorner(
         self,
         H: int,

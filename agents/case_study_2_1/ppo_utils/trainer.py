@@ -142,6 +142,9 @@ class PPOTrainer:
                 self.opt_enc = None
                 self.opt_dec = None
 
+        self._round_episodes = 0
+        self._round_catastrophes = 0
+
     # ---------- FedAvg / FedTrunc helpers: flat <-> params; also accept state_dicts ----------
 
     def _normalize_sd_view(
@@ -267,6 +270,19 @@ class PPOTrainer:
             return self._compat_squash(critic, critic.head(z))
         return None
 
+    def get_round_metrics(self, reset: bool = True) -> Dict[str, float]:
+        eps = float(self._round_episodes)
+        cats = float(self._round_catastrophes)
+        hazard_rate = (cats / eps) if eps > 0.0 else 0.0
+        out = {
+            "episodes": eps,
+            "catastrophes": cats,
+            "hazard_rate": hazard_rate,
+        }
+        if reset:
+            self._round_episodes = 0
+            self._round_catastrophes = 0
+        return out
 
     # --- absolute W&B step helper (monotonic across resumes) ---
     def _wb_step(self) -> int:
@@ -338,6 +354,12 @@ class PPOTrainer:
 
         if terminated or truncated:
             term_reason = info.get("terminated_by", "unknown")
+
+            # --- add these two lines right here ---
+            self._round_episodes += 1
+            if term_reason == "catastrophe":
+                self._round_catastrophes += 1
+
             if wandb.run is not None:
                 wandb.log({
                     f"client{self.client_id}/ep/len": self.ep_len,
