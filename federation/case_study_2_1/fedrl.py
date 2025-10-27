@@ -2,8 +2,9 @@
 # -*- coding: utf-8 -*-
 
 """
-fedrl.py — Minimal FedAvg server for CRITIC only.
+fedrl.py — Minimal FedAvg server for CRITIC only (with optional hazard-weighted aggregation).
 - Aggregates critic parameters with weighted averaging and re-broadcasts.
+- If hazard_metrics is provided to aggregate_and_refit, weights are computed as 1/(eps + hazard).
 - Ignores any autoencoder flags and states.
 - Comments are ascii-only.
 """
@@ -61,12 +62,19 @@ def _weighted_avg_state_dict(
 class FedRLServer:
     """
     Minimal server that aggregates CRITIC parameters via FedAvg and re-broadcasts them.
+
+    New: If hazard_metrics is provided to aggregate_and_refit, the server computes
+         hazard-weighted aggregation with weights w_i ∝ 1 / (eps + hazard_i).
     """
     def __init__(self, cfg: Any, device: str = "cuda"):
         self.cfg = cfg
         self.device = torch.device(device)
         self.round_idx = 0
         self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest averaged critic state
+
+        # hazard-weighting knobs (safe defaults if absent)
+        self.agg_hazard_eps = float(getattr(cfg, "agg_hazard_eps", 1e-3))
+        self.agg_w_max = float(getattr(cfg, "agg_w_max", 10.0))  # set <=0 to disable capping
 
         # Optional W&B run (server)
         self.run = None
@@ -94,24 +102,74 @@ class FedRLServer:
         crit_sd = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
         return {"critic": crit_sd}
 
+    def _compute_hazard_weights(self, hazards: List[Optional[float]]) -> List[float]:
+        """
+        Convert per-client hazards into normalized weights via 1 / (eps + hazard),
+        optionally capped by agg_w_max.
+        """
+        eps = float(self.agg_hazard_eps)
+        w_cap = float(self.agg_w_max)
+        ws: List[float] = []
+        for h in hazards:
+            h_val = 0.0 if (h is None) else float(h)
+            w = 1.0 / (eps + max(0.0, h_val))
+            if w_cap > 0.0:
+                w = min(w, w_cap)
+            ws.append(w)
+        s = sum(ws)
+        if s <= 0.0:
+            n = max(1, len(ws))
+            return [1.0 / n] * n
+        return [w / s for w in ws]
+
     def aggregate_and_refit(
         self,
         critic_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]],
+        *,
+        hazard_metrics: Optional[List[Optional[float]]] = None,
         **_kwargs
     ) -> None:
         """
-        FedAvg over the provided critic states.
-        critic_states: list of (state_dict or None, weight)
+        Aggregate over the provided critic states.
+
+        Args:
+          critic_states: list of (state_dict or None, weight). If hazard_metrics is None,
+                         these weights are used (FedAvg-compatible).
+          hazard_metrics: optional list of per-client hazard rates aligned with critic_states.
+                          If provided, server ignores the given weights and uses
+                          hazard-weighted aggregation instead: w_i ∝ 1/(eps + hazard_i).
+
+        Behavior:
+          - If hazard_metrics is provided: use hazard-based weights.
+          - Else: fallback to provided weights (original behavior).
         """
-        typed: List[Tuple[Dict[str, torch.Tensor], float]] = [
-            (sd, w) for (sd, w) in critic_states if sd is not None
-        ]
+        # choose weights
+        if hazard_metrics is not None:
+            # compute hazard-based weights aligned with critic_states
+            ws = self._compute_hazard_weights(hazard_metrics)
+            typed: List[Tuple[Dict[str, torch.Tensor], float]] = []
+            log_payload: Dict[str, float] = {}
+            for idx, (sd, _) in enumerate(critic_states):
+                if sd is None:
+                    continue
+                typed.append((sd, float(ws[idx])))
+                # prepare logging
+                log_payload[f"server/w_client_{idx}"] = float(ws[idx])
+                h = hazard_metrics[idx] if hazard_metrics[idx] is not None else 0.0
+                log_payload[f"server/hazard_client_{idx}"] = float(h)
+        else:
+            # use provided weights as-is (backward compatible)
+            typed = [(sd, float(w)) for (sd, w) in critic_states if sd is not None]
+            log_payload = {f"server/w_client_{i}": float(w) for i, (_, w) in enumerate(critic_states)}
+
         avg = _weighted_avg_state_dict(typed)
         if avg is not None:
             self.critic_state = avg
 
         if self.run is not None:
-            wandb.log({"server/round": int(self.round_idx)}, step=self._wb_step())
+            log_data = {"server/round": int(self.round_idx)}
+            log_data.update(log_payload)
+            wandb.log(log_data, step=self._wb_step())
 
     def save_checkpoint(self, save_dir: str, tag: str):
         os.makedirs(save_dir, exist_ok=True)
@@ -128,4 +186,3 @@ class FedRLServer:
     def finish(self):
         if self.run is not None:
             self.run.finish()
-
