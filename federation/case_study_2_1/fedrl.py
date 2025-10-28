@@ -41,6 +41,32 @@ import torch
 import wandb
 
 
+# ---------- key helpers (subset detection / split) ----------
+
+def _is_encoder_key(k: str) -> bool:
+    # critic state_dict keys do NOT include "critic." prefix; examples:
+    # "encoder.conv.0.weight", "encoder.head.0.weight", "_proj.0.weight"
+    return k.startswith("encoder.") or k.startswith("_proj.")
+
+def _is_head_key(k: str) -> bool:
+    # expected critic: "v.weight", "v.bias"
+    # distributional:  "head.weight", "head.bias"
+    return (k == "head.weight") or (k == "head.bias") or (k == "v.weight") or (k == "v.bias")
+
+def _split_critic(sd: Dict[str, torch.Tensor]) -> Tuple[Dict[str, torch.Tensor],
+                                                        Dict[str, torch.Tensor],
+                                                        Dict[str, torch.Tensor]]:
+    enc, head, other = {}, {}, {}
+    for k, v in sd.items():
+        if _is_encoder_key(k):
+            enc[k] = v
+        elif _is_head_key(k):
+            head[k] = v
+        else:
+            other[k] = v  # buffers: taus, etc.
+    return enc, head, other
+
+
 # ---------- core averaging helper ----------
 
 def _weighted_avg_state_dict(
@@ -111,6 +137,65 @@ def _blend_trust_region(
     return out
 
 
+# ---------- head alignment helpers (row-wise sign + capped norm) ----------
+
+def _find_head_keys(sd: Dict[str, torch.Tensor]) -> Optional[Tuple[str, str]]:
+    if "head.weight" in sd and "head.bias" in sd:
+        return ("head.weight", "head.bias")
+    if "v.weight" in sd and "v.bias" in sd:
+        return ("v.weight", "v.bias")
+    return None
+
+def _align_head_to_ref(
+    sd: Dict[str, torch.Tensor],
+    ref_sd: Optional[Dict[str, torch.Tensor]],
+    *,
+    do_scale: bool = True,
+    sclip: Tuple[float, float] = (0.25, 4.0),
+    eps: float = 1e-8,
+) -> Dict[str, torch.Tensor]:
+    """
+    Row-wise align a client's head to a reference head by sign (dot with ref row)
+    and optional norm scaling. Returns a shallow-copied state dict with aligned head.
+    - Works for DistValueCritic (head.*) and CentralCritic (v.*).
+    - If ref_sd is None or keys missing, returns sd unchanged.
+    """
+    hk = _find_head_keys(sd)
+    if hk is None or ref_sd is None:
+        return sd
+    kW, kb = hk
+    if (kW not in ref_sd) or (kb not in ref_sd):
+        return sd
+
+    W  = sd[kW].detach().cpu().clone()
+    b  = sd[kb].detach().cpu().clone()
+    Wref = ref_sd[kW].detach().cpu()
+    bref = ref_sd[kb].detach().cpu()
+
+    # shape guard
+    if W.shape != Wref.shape or b.shape != bref.shape:
+        return sd  # safest: skip alignment on mismatch
+
+    # row-wise sign via dot with reference row
+    dots = (W * Wref).sum(dim=1, keepdim=True)  # [R,1]
+    sgn  = torch.where(dots >= 0, 1.0, -1.0)    # [R,1]
+    W = W * sgn
+    b = b * sgn.squeeze(1)
+
+    # optional norm scaling toward reference row norms
+    if do_scale:
+        nr = torch.linalg.norm(Wref, dim=1).clamp_min(eps)   # [R]
+        nc = torch.linalg.norm(W,    dim=1).clamp_min(eps)   # [R]
+        scale = (nr / nc).clamp(min=sclip[0], max=sclip[1])  # [R]
+        W = W * scale[:, None]
+        b = b * scale
+
+    out = sd.copy()
+    out[kW] = W
+    out[kb] = b
+    return out
+
+
 # ---------- baseline schedule helper ----------
 
 def _spread_value(center: float, delta: float, rank: int, n_clients: int) -> float:
@@ -176,10 +261,15 @@ class FedRLServer:
 
     def package_broadcast(self) -> Dict[str, Any]:
         """
-        What clients receive. Only the critic state is sent (or None).
+        What clients receive.
+          - 'critic': full prior (encoder+proj+head+buffers) for FROZEN prior path on clients
+          - 'critic_trunc': encoder(+proj) only for TRAINABLE overwrite on clients
         """
         crit_sd = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
-        return {"critic": crit_sd}
+        enc_sd = None
+        if crit_sd is not None:
+            enc_sd = {k: v for k, v in crit_sd.items() if _is_encoder_key(k)}
+        return {"critic": crit_sd, "critic_trunc": enc_sd}
 
     # ---------- relative-hazard weighting ----------
 
@@ -254,7 +344,8 @@ class FedRLServer:
         Behavior:
           - If hazard_metrics is provided: use RELATIVE hazard-based weights.
           - Else: fallback to provided weights (original behavior).
-          - After averaging, apply trust-region blend with previous server critic.
+          - Encoder is averaged directly; head is aligned to previous prior head before averaging.
+          - After averaging, apply trust-region blend per-part, then rebuild full prior.
         """
         # collect valid entries and their original slot indices
         valid: List[Tuple[int, Dict[str, torch.Tensor], float]] = []
@@ -276,12 +367,10 @@ class FedRLServer:
             valid_slots = [slot for (slot, _, _) in valid]
             ws = self._compute_relative_hazard_weights(hazard_metrics, valid_slots, n_total)
 
-            # pair back aligned by valid_slots order
             for (slot, sd, _), w in zip(valid, ws):
                 to_avg.append((sd, float(w)))
                 log_payload[f"server/w_client_{slot}"] = float(w)
 
-            # detailed logging of hazards and baselines
             if self.run is not None:
                 for slot, h, h_b, h_t, w_raw in getattr(self, "_last_weight_debug", []):
                     log_payload[f"server/hazard_emp_client_{slot}"] = float(h)
@@ -297,40 +386,101 @@ class FedRLServer:
 
         else:
             # fallback: use provided weights
+            ws = [w for (_, _, w) in valid]
             for slot, sd, w in valid:
                 to_avg.append((sd, float(w)))
                 log_payload[f"server/w_client_{slot}"] = float(w)
 
-        # compute weighted average
-        avg = _weighted_avg_state_dict(to_avg)
+        # -------- split encoder/head/other for each client --------
+        enc_list: List[Tuple[Dict[str, torch.Tensor], float]] = []
+        head_list: List[Tuple[Dict[str, torch.Tensor], float]] = []
+        other_template: Optional[Dict[str, torch.Tensor]] = None
 
-        # trust-region blend with previous server critic
-        if avg is not None:
-            prev = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
-            tr_xi = max(0.0, float(self.trust_xi))
-            blended = _blend_trust_region(prev, avg, xi=tr_xi)
-            self.critic_state = blended
+        for (sd, w) in [(sd, w) for sd, w in [(sd, w) for (_, sd, _), w in zip(valid, ws)]]:
+            enc_i, head_i, other_i = _split_critic(sd)
+            if enc_i:
+                enc_list.append((enc_i, w))
+            if head_i:
+                head_list.append((head_i, w))
+            if other_template is None:
+                other_template = other_i  # buffers
 
-            # diagnostics
-            if self.run is not None:
-                beta_tr = (1.0 / (1.0 + tr_xi)) if tr_xi > 0.0 else 1.0
-                self._tr_beta_last = beta_tr
+        # -------- (A) encoder average + trust region --------
+        enc_avg = _weighted_avg_state_dict(enc_list) if enc_list else {}
+        prev_enc = None
+        if self.critic_state is not None:
+            prev_enc = {k: v for k, v in self.critic_state.items() if _is_encoder_key(k)}
+        enc_blend = _blend_trust_region(prev_enc, enc_avg, xi=max(0.0, float(self.trust_xi))) if enc_avg else (prev_enc or {})
 
-                # cheap magnitude probe of trust step vs raw average
-                try:
-                    v_new = torch.cat([p.flatten() for p in self.critic_state.values()])
-                    v_avg = torch.cat([p.flatten() for p in avg.values()])
-                    step_norm = torch.norm(v_new - v_avg).item()
-                    log_payload["server/trust_step_l2_vs_avg"] = float(step_norm)
-                except Exception:
-                    pass
+        # -------- (B) head alignment to previous prior then average + TR --------
+        # build reference head from previous prior
+        ref_head: Dict[str, torch.Tensor] = {}
+        if self.critic_state is not None:
+            _, ref_head, _ = _split_critic(self.critic_state)
 
+        # weighted average of aligned heads (only weight/bias)
+        head_acc: Dict[str, torch.Tensor] = {}
+        wtot = 0.0
+        if head_list:
+            # infer key set from first available head
+            hk = _find_head_keys(head_list[0][0])
+            if hk is not None:
+                kW, kb = hk
+                for head_i, w in head_list:
+                    try:
+                        aligned = _align_head_to_ref(head_i, ref_head, do_scale=True, sclip=(0.25, 4.0))
+                    except Exception:
+                        aligned = head_i
+                    Wi = aligned.get(kW, None)
+                    bi = aligned.get(kb, None)
+                    if Wi is None or bi is None:
+                        continue
+                    Wi = Wi.detach().cpu()
+                    bi = bi.detach().cpu()
+                    head_acc[kW] = (Wi * w) if kW not in head_acc else (head_acc[kW] + Wi * w)
+                    head_acc[kb] = (bi * w) if kb not in head_acc else (head_acc[kb] + bi * w)
+                    wtot += w
+                if wtot > 0.0:
+                    head_acc[kW] = head_acc[kW] / wtot
+                    head_acc[kb] = head_acc[kb] / wtot
+
+        # trust-region blend for head
+        head_blend: Dict[str, torch.Tensor] = {}
+        if head_acc:
+            prev_head = {k: v for k, v in (self.critic_state or {}).items() if _is_head_key(k)}
+            if prev_head:
+                beta_tr = 1.0 / (1.0 + max(0.0, float(self.trust_xi)))
+                for k, a in head_acc.items():
+                    p = prev_head.get(k, None)
+                    head_blend[k] = ((1.0 - beta_tr) * p.detach().cpu() + beta_tr * a) if p is not None else a
+            else:
+                head_blend = {k: v.detach().cpu() for k, v in head_acc.items()}
+        else:
+            # no head in payload; keep previous head as-is
+            head_blend = {k: v for k, v in (self.critic_state or {}).items() if _is_head_key(k)}
+
+        # -------- rebuild full prior state --------
+        new_state: Dict[str, torch.Tensor] = {}
+        new_state.update(enc_blend)                                   # encoder(+proj)
+        if other_template:
+            new_state.update({k: v.detach().cpu() for k, v in other_template.items()})  # buffers passthrough
+        new_state.update(head_blend)                                   # head
+
+        self.critic_state = {k: v.detach().cpu() for k, v in new_state.items()}
+
+        # -------- diagnostics (unchanged logging) --------
         if self.run is not None:
             log_data = {"server/round": int(self.round_idx)}
             log_data.update(log_payload)
             log_data["server/agg_trust_xi"] = float(self.trust_xi)
-            if self._tr_beta_last is not None:
-                log_data["server/agg_trust_beta"] = float(self._tr_beta_last)
+            try:
+                v_new = torch.cat([p.flatten() for p in self.critic_state.values()])
+                v_avg_e = torch.cat([p.flatten() for p in enc_avg.values()]) if enc_avg else torch.zeros(1)
+                # simple magnitude probe using encoder part (closest to past behavior)
+                step_norm = torch.norm(v_new[: v_avg_e.numel()] - v_avg_e).item() if v_avg_e.numel() > 0 else 0.0
+                log_data["server/trust_step_l2_vs_avg"] = float(step_norm)
+            except Exception:
+                pass
             wandb.log(log_data, step=self._wb_step())
 
     # ---------- checkpointing ----------
