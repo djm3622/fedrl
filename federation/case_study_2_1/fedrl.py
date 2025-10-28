@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-fedrl.py — FedAvg server for CRITIC only with relative-hazard-weighted aggregation.
+fedrl.py — FedAvg server for CRITIC only with relative-hazard-weighted aggregation
+and trust-region blending.
 
-Goal: penalize unsafe LEARNING rather than unsafe DYNAMICS.
-We weight client critics inversely to their hazard *excess* over a deterministic
-baseline hazard assigned by the environment heterogeneity schedule.
+Goal: penalize unsafe LEARNING rather than unsafe DYNAMICS, while preserving
+round-to-round stability of the server prior. We weight client critics inversely
+to their hazard excess over a deterministic baseline, then apply a trust-region
+blend between the previous server critic and the new weighted average.
 
 Definitions:
   - h_i:    empirical hazard rate reported by client i for the round
@@ -14,13 +16,20 @@ Definitions:
   - h_ti:   normalized hazard = h_i / (h_bi + eps_baseline)
   - weight: w_i ∝ 1 / (h_ti + eps_weight)^p
 
+Server trust region:
+  - theta_next = (1 - beta_tr) * theta_prev + beta_tr * theta_avg
+  - beta_tr = 1 / (1 + agg_trust_xi), agg_trust_xi >= 0
+  - Setting agg_trust_xi = 0 disables blending (theta_next = theta_avg).
+
 Config knobs (with safe defaults if missing in cfg):
-  - hazard_prob:                  float in [0,1], center of baseline hazard schedule (required by your env)
+  - hazard_prob:                  float in [0,1], center of baseline hazard schedule (required by env)
   - hazard_delta (or env HAZARD_DELTA): float >= 0, spread for baseline schedule (default 0.05)
   - agg_hazard_eps_weight:        epsilon added in weight denominator (default 1e-3)
   - agg_hazard_eps_baseline:      epsilon added in baseline denominator (default 1e-6)
   - agg_weight_power:             exponent p for 1/(...)^p (default 1.0)
   - agg_weight_cap_ratio:         cap on max/min weight ratio (>0 enables; default 30.0)
+  - agg_trust_xi:                 server trust-region xi; larger -> more conservative (default 0.1)
+  - agg_hazard_ema_rho:           EMA factor on hazards in [0,1); 0 disables EMA (default 0.9)
   - wandb_project, wandb_run_name, wandb_group: optional W&B settings
 """
 
@@ -32,7 +41,7 @@ import torch
 import wandb
 
 
-# ---------- core averaging helper (unchanged) ----------
+# ---------- core averaging helper ----------
 
 def _weighted_avg_state_dict(
     state_dicts: List[Tuple[Dict[str, torch.Tensor], float]]
@@ -76,7 +85,33 @@ def _weighted_avg_state_dict(
     return acc
 
 
-# ---------- small helper to mirror client-side heterogeneity schedule ----------
+def _blend_trust_region(
+    prev: Optional[Dict[str, torch.Tensor]],
+    avg: Dict[str, torch.Tensor],
+    xi: float
+) -> Dict[str, torch.Tensor]:
+    """
+    Trust-region blend:
+      next = (1 - beta_tr) * prev + beta_tr * avg,  with beta_tr = 1 / (1 + xi).
+    If prev is None or xi <= 0, returns avg.
+    Operates on CPU tensors; caller should move to device as needed.
+    """
+    if prev is None or xi <= 0.0:
+        return {k: v.detach().cpu() for k, v in avg.items()}
+    beta_tr = 1.0 / (1.0 + float(xi))
+    one_minus = 1.0 - beta_tr
+    out: Dict[str, torch.Tensor] = {}
+    for k in avg.keys():
+        a = avg[k].detach().cpu()
+        p = prev.get(k, None)
+        if p is None:
+            out[k] = a
+        else:
+            out[k] = one_minus * p.detach().cpu() + beta_tr * a
+    return out
+
+
+# ---------- baseline schedule helper ----------
 
 def _spread_value(center: float, delta: float, rank: int, n_clients: int) -> float:
     """
@@ -93,26 +128,32 @@ class FedRLServer:
     """
     Server that aggregates CRITIC parameters.
     If hazard_metrics is provided to aggregate_and_refit, the server performs
-    RELATIVE hazard-weighted averaging as documented above.
+    RELATIVE hazard-weighted averaging as documented above, then applies a
+    trust-region blend with the previous server critic.
     """
     def __init__(self, cfg: Any, device: str = "cuda"):
         self.cfg = cfg
         self.device = torch.device(device)
         self.round_idx = 0
-        self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest averaged critic state
+        self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest blended critic state
 
         # --- weighting knobs (with defaults) ---
-        # epsilons
         self.eps_weight   = float(getattr(cfg, "agg_hazard_eps_weight", 1e-3))
         self.eps_baseline = float(getattr(cfg, "agg_hazard_eps_baseline", 1e-6))
-        # power
         self.weight_power = float(getattr(cfg, "agg_weight_power", 1.0))
-        # cap on ratio max/min to avoid dominance (<=0 disables)
         self.cap_ratio    = float(getattr(cfg, "agg_weight_cap_ratio", 30.0))
+
         # baseline schedule center and spread
         self.baseline_center = float(getattr(cfg, "hazard_prob", 0.05))
-        # prefer cfg.hazard_delta; else fall back to env var HAZARD_DELTA; else default 0.05
         self.baseline_delta  = float(getattr(cfg, "hazard_delta", float(os.getenv("HAZARD_DELTA", "0.05"))))
+
+        # --- trust region knobs ---
+        self.trust_xi = float(getattr(cfg, "agg_trust_xi", 0.1))  # 0.0 disables trust-region blend
+        self._tr_beta_last: Optional[float] = None
+
+        # --- optional hazard EMA smoothing ---
+        self.hazard_ema_rho = float(getattr(cfg, "agg_hazard_ema_rho", 0.9))  # 0.0 disables EMA
+        self._hazard_ema: Dict[int, float] = {}  # slot -> smoothed hazard
 
         # Optional W&B run (server)
         self.run = None
@@ -157,15 +198,24 @@ class FedRLServer:
         eps_b  = self.eps_baseline
         p      = self.weight_power
         cap_r  = self.cap_ratio
+        rho    = self.hazard_ema_rho
 
-        # build per-valid-slot baseline and normalized hazards
         raw_weights: List[float] = []
         self._last_weight_debug: List[Tuple[int, float, float, float, float]] = []  # (slot, h, h_b, h_t, w_raw)
 
         for slot in valid_slots:
             # empirical hazard (clip to [0,1])
-            h = hazards_by_slot[slot]
-            h = 0.0 if h is None else float(min(max(h, 0.0), 1.0))
+            h_raw = hazards_by_slot[slot]
+            h_raw = 0.0 if h_raw is None else float(min(max(h_raw, 0.0), 1.0))
+
+            # EMA smoothing (optional)
+            if rho > 0.0:
+                h_prev = self._hazard_ema.get(slot, h_raw)
+                h = float(rho * h_prev + (1.0 - rho) * h_raw)
+                self._hazard_ema[slot] = h
+            else:
+                h = h_raw
+
             # deterministic baseline via the same spread schedule
             h_b = _spread_value(self.baseline_center, self.baseline_delta, slot, n_clients_total)
             # normalized hazard (penalize excess over baseline)
@@ -203,8 +253,8 @@ class FedRLServer:
 
         Behavior:
           - If hazard_metrics is provided: use RELATIVE hazard-based weights.
-            The server computes per-slot baseline hazards and penalizes excess hazard.
           - Else: fallback to provided weights (original behavior).
+          - After averaging, apply trust-region blend with previous server critic.
         """
         # collect valid entries and their original slot indices
         valid: List[Tuple[int, Dict[str, torch.Tensor], float]] = []
@@ -229,10 +279,9 @@ class FedRLServer:
             # pair back aligned by valid_slots order
             for (slot, sd, _), w in zip(valid, ws):
                 to_avg.append((sd, float(w)))
-                # log diagnostics
                 log_payload[f"server/w_client_{slot}"] = float(w)
 
-            # optional detailed logging of hazards and baselines
+            # detailed logging of hazards and baselines
             if self.run is not None:
                 for slot, h, h_b, h_t, w_raw in getattr(self, "_last_weight_debug", []):
                     log_payload[f"server/hazard_emp_client_{slot}"] = float(h)
@@ -240,11 +289,11 @@ class FedRLServer:
                     log_payload[f"server/hazard_norm_client_{slot}"] = float(h_t)
                     log_payload[f"server/w_raw_client_{slot}"] = float(w_raw)
 
-                # also log the main knob values to make sweeps auditable
                 log_payload["server/eps_weight"] = float(self.eps_weight)
                 log_payload["server/eps_baseline"] = float(self.eps_baseline)
                 log_payload["server/weight_power"] = float(self.weight_power)
                 log_payload["server/cap_ratio"] = float(self.cap_ratio)
+                log_payload["server/hazard_ema_rho"] = float(self.hazard_ema_rho)
 
         else:
             # fallback: use provided weights
@@ -252,13 +301,36 @@ class FedRLServer:
                 to_avg.append((sd, float(w)))
                 log_payload[f"server/w_client_{slot}"] = float(w)
 
+        # compute weighted average
         avg = _weighted_avg_state_dict(to_avg)
+
+        # trust-region blend with previous server critic
         if avg is not None:
-            self.critic_state = avg
+            prev = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
+            tr_xi = max(0.0, float(self.trust_xi))
+            blended = _blend_trust_region(prev, avg, xi=tr_xi)
+            self.critic_state = blended
+
+            # diagnostics
+            if self.run is not None:
+                beta_tr = (1.0 / (1.0 + tr_xi)) if tr_xi > 0.0 else 1.0
+                self._tr_beta_last = beta_tr
+
+                # cheap magnitude probe of trust step vs raw average
+                try:
+                    v_new = torch.cat([p.flatten() for p in self.critic_state.values()])
+                    v_avg = torch.cat([p.flatten() for p in avg.values()])
+                    step_norm = torch.norm(v_new - v_avg).item()
+                    log_payload["server/trust_step_l2_vs_avg"] = float(step_norm)
+                except Exception:
+                    pass
 
         if self.run is not None:
             log_data = {"server/round": int(self.round_idx)}
             log_data.update(log_payload)
+            log_data["server/agg_trust_xi"] = float(self.trust_xi)
+            if self._tr_beta_last is not None:
+                log_data["server/agg_trust_beta"] = float(self._tr_beta_last)
             wandb.log(log_data, step=self._wb_step())
 
     # ---------- checkpointing ----------

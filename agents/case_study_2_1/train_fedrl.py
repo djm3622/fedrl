@@ -10,6 +10,12 @@ train_fedrl.py — Multi-process single-GPU FedAvg over the CRITIC (MAPPO), used
     * they update a frozen prior head inside the critic
     * they enable affine shrink + soft tanh tube in forward
 - Autoencoder flags are ignored; no barycenter logic.
+
+Notes:
+- Trust-region blending and hazard EMA are implemented server-side in FedRLServer.
+- No changes needed here beyond config values the user may set:
+    * agg_trust_xi (float, default 0.1)
+    * agg_hazard_ema_rho (float, default 0.9; set 0.0 to disable)
 """
 
 from __future__ import annotations
@@ -266,10 +272,10 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         for msg in raw_msgs:
             crit_states.append((msg.get("critic_state", None), 1.0))
 
-        # Aggregate with hazard-weighted prior (critic only)
+        # Aggregate with hazard-weighted prior (critic only) + trust-region blending on server
         server.aggregate_and_refit(
             critic_states=crit_states,
-            hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
+            hazard_metrics=hazard_metrics,
         )
 
         # Broadcast the averaged critic back out (as prior only)
