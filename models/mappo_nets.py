@@ -301,7 +301,7 @@ class CentralCritic(_CriticBase):
 
 class DistValueCritic(_CriticBase):
     def __init__(self, in_ch: int = 6, feat_dim: int = 256, n_quantiles: int = 51,
-                 v_min: float = -1100.0, v_max: float = 1200.0, squash_temp: float = 10.0):
+                 v_min: float = -1100.0, v_max: float = 1200.0, squash_temp: float = 50.0):
         super().__init__(feat_dim=feat_dim, in_ch=in_ch)
         self.n_quantiles = n_quantiles
         taus = (torch.arange(n_quantiles, dtype=torch.float32) + 0.5) / n_quantiles

@@ -151,7 +151,7 @@ def _align_head_to_ref(
     ref_sd: Optional[Dict[str, torch.Tensor]],
     *,
     do_scale: bool = True,
-    sclip: Tuple[float, float] = (0.25, 4.0),
+    sclip: Tuple[float, float] = (0.5, 1.5),
     eps: float = 1e-8,
 ) -> Dict[str, torch.Tensor]:
     """
