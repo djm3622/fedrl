@@ -21,9 +21,6 @@ The codebase supports **Local**, **FedAvg (critic‑only)**, **FedTrunc (critic 
   - [Case Study 2.1 Config](#case-study-21-config)
   - [FedRL‑Specific Settings](#fedrlspecific-settings)
 - [Outputs and Logging](#outputs-and-logging)
-- [Reproducibility](#reproducibility)
-- [Troubleshooting](#troubleshooting)
-- [License](#license)
 
 ---
 
