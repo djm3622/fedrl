@@ -6,14 +6,10 @@ train_fedrl.py — Multi-process single-GPU FedAvg over the CRITIC (MAPPO), used
 - Each client runs standard PPO (MAPPO).
 - After each round, clients send their critic state to server.
 - Server performs weighted parameter averaging and broadcasts the averaged critic back.
-- Clients:
-    * OVERWRITE the TRAINABLE encoder (+proj) with 'critic_trunc'
-    * Update the FROZEN prior head/trunk with 'critic'
-    * Enable affine shrink + soft tanh tube in forward
-
-Notes:
-- Trust-region blending and hazard EMA are implemented server-side in FedRLServer.
-- No changes to logging here.
+- Clients DO NOT load the averaged weights into their critic. Instead:
+    * they update a frozen prior head inside the critic
+    * they enable affine shrink + soft tanh tube in forward
+- Autoencoder flags are ignored; no barycenter logic.
 """
 
 from __future__ import annotations
@@ -90,28 +86,6 @@ def _compute_epochs_per_client(local_epochs_per_round: int, n_clients: int, weig
     return out
 
 
-# ---------------- optimizer moment reset (best-effort) ----------------
-def _reset_encoder_moments_only(trainer: PPOTrainer):
-    """
-    Best-effort reset of optimizer moments for encoder/_proj params only.
-    Safe no-op if optimizer layout is unknown.
-    """
-    opt = getattr(trainer, "optim_critic", None) or getattr(trainer, "optimizer_critic", None) or getattr(trainer, "opt_critic", None)
-    if opt is None:
-        return
-    enc_ids = {id(p) for n, p in trainer.model.critic.named_parameters()
-               if n.startswith("encoder.") or n.startswith("_proj.")}
-    try:
-        for group in opt.param_groups:
-            for p in group.get("params", []):
-                if id(p) in enc_ids:
-                    st = opt.state.get(p, None)
-                    if st is not None:
-                        st.clear()
-    except Exception:
-        pass
-
-
 # ---------------- Client loop ----------------
 def _client_loop(
     rank: int,
@@ -124,7 +98,7 @@ def _client_loop(
 ):
     """
     Simple command loop:
-      - 'broadcast': receive averaged critic sd and set prior + overwrite encoder
+      - 'broadcast': receive averaged critic sd and set it as the prior (no weight overwrite)
       - 'train_round': run local PPO for given epochs, then reply with local critic sd
       - 'shutdown': exit
     """
@@ -167,42 +141,24 @@ def _client_loop(
         trainer = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank, wb_step_base=0)
 
         def _load_critic_from_pkg(pkg: Dict[str, Any]):
-            crit_sd  = pkg.get("critic", None)        # full prior (frozen on client)
-            trunc_sd = pkg.get("critic_trunc", None)  # encoder(+proj) only (trainable on client)
-
-            # (A) overwrite TRAINABLE encoder (+proj) with averaged one
-            if trunc_sd is not None and getattr(trainer.model, "critic", None) is not None:
-                try:
-                    # filter to encoder/_proj keys only (defensive)
-                    sub = {k: v for k, v in trunc_sd.items() if k.startswith("encoder.") or k.startswith("_proj.")}
-                    if sub:
-                        trainer.model.critic.load_state_dict(sub, strict=False)
-                        trainer.model.critic.to(trainer.device)
-                        _reset_encoder_moments_only(trainer)  # best-effort reset of moments for encoder only
-                except Exception as e:
-                    print(f"[client {rank}] failed to load encoder trunc: {e}")
-
-            # (B) update FROZEN prior (head + trunk, as configured)
+            crit_sd = pkg.get("critic", None)
             if crit_sd is not None and getattr(trainer.model, "critic", None) is not None:
                 try:
+                    # DO NOT overwrite local critic weights; update frozen prior head only
                     if hasattr(trainer.model, "update_critic_prior"):
                         trainer.model.update_critic_prior(crit_sd)
+                    # enable forward-time prior regularization
+                    if hasattr(trainer.model, "set_prior_regularization"):
+                        trainer.model.set_prior_regularization(
+                            enabled=getattr(trainer.cfg, "prior_enabled", True),
+                            alpha=float(getattr(trainer.cfg, "prior_alpha", 0.5)),
+                            beta=float(getattr(trainer.cfg, "prior_beta", 1.0)),
+                            radius_abs=float(getattr(trainer.cfg, "prior_radius_abs", 0.0)),
+                            radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
+                        )
+                    trainer.model.critic.to(trainer.device)
                 except Exception as e:
                     print(f"[client {rank}] failed to set critic prior: {e}")
-
-            # (C) enable forward-time prior regularization (use_full_trunk=True per theory)
-            try:
-                if hasattr(trainer.model, "set_prior_regularization"):
-                    trainer.model.set_prior_regularization(
-                        enabled=getattr(trainer.cfg, "prior_enabled", True),
-                        alpha=float(getattr(trainer.cfg, "prior_alpha", 0.5)),
-                        beta=float(getattr(trainer.cfg, "prior_beta", 1.0)),
-                        radius_abs=float(getattr(trainer.cfg, "prior_radius_abs", 0.0)),
-                        radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
-                        use_full_trunk=True,
-                    )
-            except Exception:
-                pass
 
         while True:
             msg = cmd_q.get()
@@ -310,13 +266,13 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         for msg in raw_msgs:
             crit_states.append((msg.get("critic_state", None), 1.0))
 
-        # Aggregate with hazard-weighted prior (critic only) + trust-region blending on server
+        # Aggregate with hazard-weighted prior (critic only)
         server.aggregate_and_refit(
             critic_states=crit_states,
-            hazard_metrics=hazard_metrics,
+            hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
         )
 
-        # Broadcast the averaged critic back out (as prior + encoder-only)
+        # Broadcast the averaged critic back out (as prior only)
         pkg = server.package_broadcast()
         for cq in cmd_queues:
             cq.put({"cmd": "broadcast", "payload": pkg})

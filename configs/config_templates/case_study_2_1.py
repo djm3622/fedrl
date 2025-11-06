@@ -98,8 +98,6 @@ class MultiAgentGridConfig:
     risk_enable: bool = True         # turn on risk-aware mixing
     risk_beta: float = 0.2            # 0.0..1.0 trade-off (performance vs safety)
     cvar_alpha: float = 0.10          # tail level for CVaR
-    lambda_cvar: float = 0.02     # try 0.02–0.05
-    tau_cvar: float = 1.5         # optional temperature, 1.0–2.0
 
     # federation
     num_communication_rounds: int = 1
@@ -121,13 +119,8 @@ class MultiAgentGridConfig:
     prior_radius_abs: float = 0.0
     prior_radius_rel: float = 0.10
 
-    agg_hazard_eps_weight: float = 1.0e-3   # denominator epsilon in 1/(eps + hazard)
-    agg_hazard_eps_baseline: float = 1.0e-6
-    agg_weight_power: float = 1.0
-    agg_weight_cap_ratio: float = 0.0
-
-    agg_trust_xi: float = 0.1 
-    agg_hazard_ema_rho: float = 0.9
+    agg_hazard_eps: float = 1e-3
+    agg_w_max: float = 10.0
 
     def _nearest_free_noncorner(
         self,
