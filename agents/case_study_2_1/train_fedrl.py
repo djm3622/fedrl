@@ -269,7 +269,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         # Aggregate with hazard-weighted prior (critic only)
         server.aggregate_and_refit(
             critic_states=crit_states,
-            hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
+            #hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
         )
 
         # Broadcast the averaged critic back out (as prior only)

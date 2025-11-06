@@ -113,11 +113,14 @@ class MultiAgentGridConfig:
     fedrl_rec_lambda: float = 1.0e-2     # not used in the loss, only kept for compatibility
     fedrl_latent_hw: int = 5
 
-    prior_enabled: bool = True
-    prior_alpha: float = 0.5
-    prior_beta: float = 1.0
-    prior_radius_abs: float = 0.0
-    prior_radius_rel: float = 0.10
+    enabled: bool = True
+    alpha: float = 0.5
+    beta: float = 1.0
+    radius_abs: float = 0.0
+    radius_rel: float = 0.10
+
+    lambda_cvar: float = 0.02     # try 0.02–0.05
+    tau_cvar: float = 1.5         # optional temperature, 1.0–2.0
 
     agg_hazard_eps: float = 1e-3
     agg_w_max: float = 10.0
