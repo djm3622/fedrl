@@ -125,6 +125,9 @@ class MultiAgentGridConfig:
     agg_hazard_eps: float = 1e-3
     agg_w_max: float = 10.0
 
+    # barycenter-based trust region (FedRL prior)
+    fedrl_max_barycenter_states: int = 256  # cap unique states used per round; <=0 to disable cap
+
     def _nearest_free_noncorner(
         self,
         H: int,

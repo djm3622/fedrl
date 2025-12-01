@@ -95,6 +95,7 @@ class PPOTrainer:
         self._probe_max = 64
         self._prev_critic_vec: Union[torch.Tensor, None] = None
         self._prev_probe_out: Union[torch.Tensor, None] = None
+        self._state_visit_stats: dict[str, dict[str, Any]] = {}
 
         # seed a few probe states
         with torch.no_grad():
@@ -284,6 +285,50 @@ class PPOTrainer:
             self._round_catastrophes = 0
         return out
 
+    def pop_state_distribution_summary(self, max_unique: int | None = None) -> Dict[str, torch.Tensor] | None:
+        """
+        Collapse the per-round state-action-distribution pairs into a compact summary.
+
+        - Deduplicates critic observations collected during the round.
+        - Computes model outputs on the unique states.
+        - Weights each unique state by visit frequency and CVaR (or value magnitude for expected critics).
+        - Optionally caps the number of unique states considered via max_unique (most frequent first).
+        """
+        if not self._state_visit_stats:
+            return None
+
+        entries = list(self._state_visit_stats.values())
+        entries.sort(key=lambda e: int(e.get("count", 0)), reverse=True)
+        if max_unique is not None and max_unique > 0:
+            entries = entries[:max_unique]
+
+        states = torch.stack([e["state"] for e in entries], dim=0).to(self.device)
+
+        with torch.no_grad():
+            outputs = self.model.critic(states)
+
+        if outputs.ndim == 1:
+            outputs = outputs.unsqueeze(-1)
+
+        alpha = float(getattr(self.cfg, "cvar_alpha", 0.10))
+        weights: List[float] = []
+        for idx, entry in enumerate(entries):
+            count = float(entry.get("count", 0))
+            dist_vec = outputs[idx]
+            if self.is_dist:
+                k = max(1, int(alpha * dist_vec.numel()))
+                tail_mean = dist_vec[:k].mean().abs().item()
+                weight = count * max(tail_mean, 1e-6)
+            else:
+                weight = count * max(dist_vec.mean().abs().item(), 1e-6)
+            weights.append(weight)
+
+        self._state_visit_stats = {}
+        return {
+            "dists": outputs.detach().cpu(),
+            "weights": torch.tensor(weights, dtype=torch.float32),
+        }
+
     # --- absolute W&B step helper (monotonic across resumes) ---
     def _wb_step(self) -> int:
         return int(self.wb_step_base + self.total_env_steps)
@@ -324,6 +369,13 @@ class PPOTrainer:
         ego_bna = ego_list_to_tchw(self.actor_obs).to(self.device)
         glob_b = to_tchw(self.critic_obs).unsqueeze(0).to(self.device)
         agent_ids = torch.arange(self.n_agents, dtype=torch.long, device=self.device)
+
+        # Track unique critic observations per round (CPU snapshot for hashing)
+        glob_cpu = glob_b.squeeze(0).detach().cpu()
+        key = glob_cpu.numpy().tobytes()
+        if key not in self._state_visit_stats:
+            self._state_visit_stats[key] = {"count": 0, "state": glob_cpu}
+        self._state_visit_stats[key]["count"] += 1
 
         h_in = self.h_actor.detach()
 

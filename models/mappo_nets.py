@@ -269,6 +269,17 @@ class CentralCritic(_CriticBase):
                 except Exception:
                     pass  # be tolerant to partial state dicts
 
+    @torch.no_grad()
+    def update_prior_with_barycenter(self, barycenter: torch.Tensor) -> None:
+        """
+        Set a constant prior head from a barycentered scalar distribution.
+        """
+        scalar = float(barycenter.flatten().mean().item())
+        nn.init.zeros_(self.v_prior.weight)
+        nn.init.constant_(self.v_prior.bias, scalar)
+        # Head-only trust region when barycentered
+        self._prior_cfg.use_full_trunk = False
+
     def forward(self, global_planes: torch.Tensor) -> torch.Tensor:
         # Local path
         z_loc = self._encode_local(global_planes)          # [B, feat_dim]
@@ -353,6 +364,24 @@ class DistValueCritic(_CriticBase):
                 except Exception:
                     pass
 
+    @torch.no_grad()
+    def update_prior_with_barycenter(self, barycenter: torch.Tensor) -> None:
+        """
+        Set a constant distributional prior head from a barycentered quantile vector.
+        """
+        vec = barycenter.flatten()
+        if vec.numel() < self.n_quantiles:
+            # pad with last element if shorter
+            pad = torch.full((self.n_quantiles - vec.numel(),), float(vec[-1].item()), device=vec.device, dtype=vec.dtype)
+            vec = torch.cat([vec, pad], dim=0)
+        elif vec.numel() > self.n_quantiles:
+            vec = vec[: self.n_quantiles]
+
+        nn.init.zeros_(self.head_prior.weight)
+        self.head_prior.bias.copy_(vec)
+        # Head-only trust region when barycentered
+        self._prior_cfg.use_full_trunk = False
+
     def _squash(self, q_raw: torch.Tensor) -> torch.Tensor:
         c = 0.5 * (self.v_max + self.v_min)
         h = 0.5 * (self.v_max - self.v_min)
@@ -423,6 +452,11 @@ class MAPPOModel:
     def update_critic_prior(self, prior_state_dict: dict):
         if hasattr(self.critic, "update_prior_from_state_dict"):
             self.critic.update_prior_from_state_dict(prior_state_dict)
+
+    @torch.no_grad()
+    def update_critic_prior_barycenter(self, barycenter: torch.Tensor):
+        if hasattr(self.critic, "update_prior_with_barycenter"):
+            self.critic.update_prior_with_barycenter(barycenter)
 
     # Toggle/configure forward-time prior regularization.
     # use_full_trunk=True by default to make the prior = full averaged critic.

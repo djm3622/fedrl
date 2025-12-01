@@ -2,14 +2,13 @@
 # -*- coding: utf-8 -*-
 
 """
-train_fedrl.py — Multi-process single-GPU FedAvg over the CRITIC (MAPPO), used as a forward-time prior.
+train_fedrl.py — Multi-process single-GPU trust-region training without parameter federation.
 - Each client runs standard PPO (MAPPO).
-- After each round, clients send their critic state to server.
-- Server performs weighted parameter averaging and broadcasts the averaged critic back.
-- Clients DO NOT load the averaged weights into their critic. Instead:
-    * they update a frozen prior head inside the critic
-    * they enable affine shrink + soft tanh tube in forward
-- Autoencoder flags are ignored; no barycenter logic.
+- During a round, clients collect unique state-action-distribution pairs.
+- After each round, clients send a CVaR/frequency-weighted summary of those pairs.
+- Server forms a barycenter over the summarized distributions and broadcasts it as the PRIOR only.
+- Clients keep their local critics untouched but refresh the frozen prior head, preserving clamp + shrinkage.
+- Autoencoder flags are ignored for the new barycenter path.
 """
 
 from __future__ import annotations
@@ -141,9 +140,23 @@ def _client_loop(
         trainer = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank, wb_step_base=0)
 
         def _load_critic_from_pkg(pkg: Dict[str, Any]):
-            crit_sd = pkg.get("critic", None)
-            if crit_sd is not None and getattr(trainer.model, "critic", None) is not None:
-                try:
+            try:
+                bary = pkg.get("prior_barycenter", None)
+                crit_sd = pkg.get("critic", None)
+                if bary is not None and getattr(trainer.model, "critic", None) is not None:
+                    if hasattr(trainer.model, "update_critic_prior_barycenter"):
+                        trainer.model.update_critic_prior_barycenter(bary)
+                    if hasattr(trainer.model, "set_prior_regularization"):
+                        trainer.model.set_prior_regularization(
+                            enabled=getattr(trainer.cfg, "prior_enabled", True),
+                            alpha=float(getattr(trainer.cfg, "prior_alpha", 0.5)),
+                            beta=float(getattr(trainer.cfg, "prior_beta", 1.0)),
+                            radius_abs=float(getattr(trainer.cfg, "prior_radius_abs", 0.0)),
+                            radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
+                            use_full_trunk=False,
+                        )
+                    trainer.model.critic.to(trainer.device)
+                elif crit_sd is not None and getattr(trainer.model, "critic", None) is not None:
                     # DO NOT overwrite local critic weights; update frozen prior head only
                     if hasattr(trainer.model, "update_critic_prior"):
                         trainer.model.update_critic_prior(crit_sd)
@@ -157,8 +170,8 @@ def _client_loop(
                             radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
                         )
                     trainer.model.critic.to(trainer.device)
-                except Exception as e:
-                    print(f"[client {rank}] failed to set critic prior: {e}")
+            except Exception as e:
+                print(f"[client {rank}] failed to set critic prior: {e}")
 
         while True:
             msg = cmd_q.get()
@@ -184,10 +197,15 @@ def _client_loop(
                     except Exception:
                         crit_state = None
 
+                dist_summary = trainer.pop_state_distribution_summary(
+                    max_unique=int(getattr(cfg, "fedrl_max_barycenter_states", 0)) or None
+                )
+
                 rep_q.put({
                     "rank": rank,
                     "critic_state": crit_state,
                     "metrics": trainer.get_round_metrics(reset=True),  # hazard_rate etc.
+                    "dist_summary": dist_summary,
                 })
             else:
                 continue
@@ -202,7 +220,7 @@ def _client_loop(
 # ---------------- Runner ----------------
 def run_fedrl(cfg: Any) -> Tuple[str, str]:
     """
-    Multi-process FedAvg over the critic only (server-side), used as forward-time prior on clients.
+    Multi-process FedRL runner that builds a barycenter prior each round (no parameter federation).
     Returns (critic_ckpt_path or "", "").
     """
     device = str(cfg.device)
@@ -255,22 +273,13 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
                 raise RuntimeError(f"client {rank} failed: {msg['error']}")
             raw_msgs.append(msg)
 
-        # Build hazard_metrics aligned with client messages
-        hazard_metrics: List[Optional[float]] = []
+        # Build per-client summaries of unique state distributions (trust region prior)
+        dist_summaries: List[Optional[Dict[str, Any]]] = []
         for msg in raw_msgs:
-            m = msg.get("metrics", {}) or {}
-            hazard_metrics.append(float(m.get("hazard_rate", 0.0)))
+            dist_summaries.append(msg.get("dist_summary", None))
 
-        # Package critic states (weights here are dummies; server will ignore when hazard_metrics is provided)
-        crit_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]] = []
-        for msg in raw_msgs:
-            crit_states.append((msg.get("critic_state", None), 1.0))
-
-        # Aggregate with hazard-weighted prior (critic only)
-        server.aggregate_and_refit(
-            critic_states=crit_states,
-            #hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
-        )
+        # Update the server-side barycenter prior (no parameter federation)
+        server.update_prior_from_barycenters(dist_summaries)
 
         # Broadcast the averaged critic back out (as prior only)
         pkg = server.package_broadcast()

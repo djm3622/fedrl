@@ -145,10 +145,9 @@ outputs/<wandb_project>/<wandb_run_name>/{actor_arch.txt,critic_arch.txt}
   Aggregates critic parameters **excluding** the final distributional head. This keeps the quantile/logit head local while sharing the backbone.  
   See `federation/case_study_2_1/fedtrunc.py`.
 
-- **FedRL (hazard‑weighted trust‑region)**  
-  Weights clients inversely by (normalized) hazard **excess** and forms a server update, then blends with a **trust‑region** coefficient to control drift:  
-  `theta_next = (1 - beta_tr) * theta_prev + beta_tr * theta_agg`.  
-  See `federation/case_study_2_1/fedrl.py` for precise definitions of hazard normalization, weights, and blending.
+- **FedRL (barycenter trust‑region prior)**
+  Ignores parameter federation and instead builds a per-round barycenter over the unique state distributions encountered (frequency- and CVaR-weighted). The barycenter is broadcast as a frozen critic prior for the next round while preserving the existing shrinkage + clamp logic.
+  See `agents/case_study_2_1/train_fedrl.py` and `federation/case_study_2_1/barycenter.py` for details.
 
 ---
 

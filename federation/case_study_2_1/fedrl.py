@@ -2,11 +2,11 @@
 # -*- coding: utf-8 -*-
 
 """
-fedrl.py — Minimal FedAvg server for CRITIC only (with optional hazard-weighted aggregation).
-- Aggregates critic parameters with weighted averaging and re-broadcasts.
-- If hazard_metrics is provided to aggregate_and_refit, weights are computed as 1/(eps + hazard).
-- Ignores any autoencoder flags and states.
-- Comments are ascii-only.
+fedrl.py — Server utilities for FedRL trust-region priors.
+
+The legacy FedAvg aggregation helpers remain for compatibility, but the
+current FedRL path focuses on a per-round barycenter over critic outputs
+instead of parameter federation.
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from typing import Any, Dict, List, Tuple, Optional
 import os
 import torch
 import wandb
+
+from federation.case_study_2_1.barycenter import weighted_barycenter
 
 
 def _weighted_avg_state_dict(
@@ -71,6 +73,7 @@ class FedRLServer:
         self.device = torch.device(device)
         self.round_idx = 0
         self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest averaged critic state
+        self.prior_barycenter: Optional[torch.Tensor] = None
 
         # hazard-weighting knobs (safe defaults if absent)
         self.agg_hazard_eps = float(getattr(cfg, "agg_hazard_eps", 1e-3))
@@ -100,7 +103,8 @@ class FedRLServer:
         What clients receive. Only the critic state is sent (or None).
         """
         crit_sd = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
-        return {"critic": crit_sd}
+        bary = None if self.prior_barycenter is None else self.prior_barycenter.detach().cpu()
+        return {"critic": crit_sd, "prior_barycenter": bary}
 
     def _compute_hazard_weights(self, hazards: List[Optional[float]]) -> List[float]:
         """
@@ -171,6 +175,47 @@ class FedRLServer:
             log_data.update(log_payload)
             wandb.log(log_data, step=self._wb_step())
 
+    def update_prior_from_barycenters(self, summaries: List[Optional[Dict[str, Any]]]):
+        """
+        Build a trust-region prior from client state-distribution summaries.
+
+        Each summary is expected to contain:
+          - "dists": torch.Tensor [N, Q] or [N], critic outputs on unique states
+          - "weights": torch.Tensor [N], visit- and CVaR-weighted counts
+        """
+        dist_batches: List[torch.Tensor] = []
+        weight_batches: List[torch.Tensor] = []
+
+        for summary in summaries:
+            if summary is None:
+                continue
+            d = summary.get("dists", None)
+            w = summary.get("weights", None)
+            if d is None or w is None:
+                continue
+            d_t = torch.as_tensor(d, dtype=torch.float32)
+            w_t = torch.as_tensor(w, dtype=torch.float32)
+            if d_t.ndim == 1:
+                d_t = d_t.unsqueeze(0)
+            if d_t.size(0) != w_t.numel():
+                continue
+            dist_batches.append(d_t)
+            weight_batches.append(w_t)
+
+        if not dist_batches:
+            return
+
+        d_all = torch.cat(dist_batches, dim=0)
+        w_all = torch.cat(weight_batches, dim=0)
+        bary = weighted_barycenter(d_all, w_all)
+        self.prior_barycenter = bary.detach().cpu()
+
+        if self.run is not None:
+            wandb.log({
+                "server/round": int(self.round_idx),
+                "server/barycenter_norm": float(torch.norm(self.prior_barycenter).item()),
+            }, step=self._wb_step())
+
     def save_checkpoint(self, save_dir: str, tag: str):
         os.makedirs(save_dir, exist_ok=True)
         crit_path = None
@@ -180,6 +225,13 @@ class FedRLServer:
             if self.run is not None:
                 art = wandb.Artifact(name=f"critic_{tag}", type="weights")
                 art.add_file(crit_path)
+                self.run.log_artifact(art)
+        if self.prior_barycenter is not None:
+            bary_path = os.path.join(save_dir, f"barycenter_{tag}.pth")
+            torch.save(self.prior_barycenter, bary_path)
+            if self.run is not None:
+                art = wandb.Artifact(name=f"barycenter_{tag}", type="prior")
+                art.add_file(bary_path)
                 self.run.log_artifact(art)
         return crit_path
 
