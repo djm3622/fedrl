@@ -76,6 +76,9 @@ class FedRLServer:
         self.agg_hazard_eps = float(getattr(cfg, "agg_hazard_eps", 1e-3))
         self.agg_w_max = float(getattr(cfg, "agg_w_max", 10.0))  # set <=0 to disable capping
 
+        self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest averaged critic state
+        self.prior_quantiles: Optional[torch.Tensor] = None          # global distributional prior vector
+
         # Optional W&B run (server)
         self.run = None
         try:
@@ -92,15 +95,73 @@ class FedRLServer:
         except Exception:
             self.run = None
 
+    @torch.no_grad()
+    def set_global_prior_quantiles(self, q_prior: Optional[torch.Tensor]) -> None:
+        """
+        Set the global distributional prior vector that will be broadcast to all clients.
+
+        Args:
+          q_prior: tensor [Nq] on any device, or None to clear.
+        """
+        if q_prior is None:
+            self.prior_quantiles = None
+            return
+
+        # Ensure tensor on device, 1D
+        if not isinstance(q_prior, torch.Tensor):
+            q_prior = torch.tensor(q_prior, dtype=torch.float32, device=self.device)
+        else:
+            q_prior = q_prior.to(self.device, dtype=torch.float32)
+
+        if q_prior.dim() != 1:
+            raise ValueError(
+                f"global prior quantiles must be 1D, got shape {tuple(q_prior.shape)}"
+            )
+
+        # Store a cpu copy for broadcasting
+        self.prior_quantiles = q_prior.detach().cpu()
+
+        # --- NEW: log global barycenter on the server using Table + histogram plot ---
+        if self.run is not None:
+            try:
+                arr = self.prior_quantiles.numpy().astype("float32")
+                data = [[float(x)] for x in arr]
+                table = wandb.Table(data=data, columns=["prior_q"])
+                hist = wandb.plot.histogram(
+                    table,
+                    "prior_q",
+                    title="Global prior barycenter",
+                )
+                wandb.log(
+                    {
+                        "server/prior_barycenter_mean": float(arr.mean()),
+                        "server/prior_barycenter_min": float(arr.min()),
+                        "server/prior_barycenter_max": float(arr.max()),
+                        "server/prior_barycenter_hist": hist,
+                    },
+                    step=self._wb_step(),
+                )
+            except Exception as e:
+                print(f"[FedRLServer] failed to log global barycenter: {e}")
+        # --- end NEW ---
+
     def _wb_step(self) -> int:
         return int(self.round_idx)
 
     def package_broadcast(self) -> Dict[str, Any]:
         """
-        What clients receive. Only the critic state is sent (or None).
+        What clients receive.
+
+        For the new method, the important field is 'prior_quantiles', which is
+        a global distributional prior vector. 'critic' is kept for backward
+        compatibility and can be ignored by clients if they use the vector prior.
         """
-        crit_sd = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
-        return {"critic": crit_sd}
+        crit_sd = None if self.critic_state is None else {
+            k: v.detach().cpu() for k, v in self.critic_state.items()
+        }
+        prior_q = None if self.prior_quantiles is None else self.prior_quantiles.detach().cpu()
+        return {"critic": crit_sd, "prior_quantiles": prior_q}
+
 
     def _compute_hazard_weights(self, hazards: List[Optional[float]]) -> List[float]:
         """
