@@ -10,6 +10,9 @@ train_fedrl.py — Multi-process single-GPU FedAvg over the CRITIC (MAPPO), used
     * they update a frozen prior head inside the critic
     * they enable affine shrink + soft tanh tube in forward
 - Autoencoder flags are ignored; no barycenter logic.
+
+Supports a federation bypass (cfg.enable_federated_server=False) that keeps clients local,
+refreshing their priors directly from their own critic snapshots each round.
 """
 
 from __future__ import annotations
@@ -99,7 +102,8 @@ def _client_loop(
     """
     Simple command loop:
       - 'broadcast': receive averaged critic sd and set it as the prior (no weight overwrite)
-      - 'train_round': run local PPO for given epochs, then reply with local critic sd
+      - 'train_round': run local PPO for given epochs, then reply with local critic sd when requested
+      - 'refresh_prior': rebuild the local prior directly from this client's critic
       - 'shutdown': exit
     """
     try:
@@ -176,9 +180,9 @@ def _client_loop(
                     if trainer.total_env_steps >= cfg.total_steps:
                         break
 
-                # reply with local critic state (to be averaged on server)
+                collect_state = bool(msg.get("collect_state", True))
                 crit_state = None
-                if getattr(trainer.model, "critic", None) is not None:
+                if collect_state and getattr(trainer.model, "critic", None) is not None:
                     try:
                         crit_state = {k: v.detach().cpu() for k, v in trainer.model.critic.state_dict().items()}
                     except Exception:
@@ -189,6 +193,15 @@ def _client_loop(
                     "critic_state": crit_state,
                     "metrics": trainer.get_round_metrics(reset=True),  # hazard_rate etc.
                 })
+            elif cmd == "refresh_prior":
+                # build next-round prior locally from this client's critic
+                if getattr(trainer.model, "critic", None) is not None and hasattr(trainer.model, "update_critic_prior"):
+                    try:
+                        state = {k: v.detach().cpu() for k, v in trainer.model.critic.state_dict().items()}
+                        trainer.model.update_critic_prior(state)
+                        trainer.model.critic.to(trainer.device)
+                    except Exception as e:
+                        print(f"[client {rank}] failed to refresh local prior: {e}")
             else:
                 continue
 
@@ -204,14 +217,19 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
     """
     Multi-process FedAvg over the critic only (server-side), used as forward-time prior on clients.
     Returns (critic_ckpt_path or "", "").
+
+    When cfg.enable_federated_server is False, bypasses server aggregation entirely and
+    updates each client's prior directly from its own round data.
     """
     device = str(cfg.device)
     n_clients = int(getattr(cfg, "n_clients", 1))
     total_cpus = int(os.getenv("SLURM_CPUS_PER_TASK", str(os.cpu_count() or 4)))
     threads_per_client = max(1, total_cpus // max(1, n_clients))
 
+    use_server = bool(getattr(cfg, "enable_federated_server", False))
+
     # Server
-    server = FedRLServer(cfg, device=device)
+    server = FedRLServer(cfg, device=device) if use_server else None
 
     # Normalize weights and allocate per-client epochs
     w = normalize_weights(cfg.client_weights, cfg.n_clients)
@@ -234,9 +252,10 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         procs.append(p)
 
     # Initial broadcast (may be empty on round 0)
-    pkg0 = server.package_broadcast()
-    for cq in cmd_queues:
-        cq.put({"cmd": "broadcast", "payload": pkg0})
+    if use_server and server is not None:
+        pkg0 = server.package_broadcast()
+        for cq in cmd_queues:
+            cq.put({"cmd": "broadcast", "payload": pkg0})
 
     # Rounds
     R = int(getattr(cfg, "num_communication_rounds", 1))
@@ -245,9 +264,13 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
 
         # Ask clients to train with their budget
         for rank in range(n_clients):
-            cmd_queues[rank].put({"cmd": "train_round", "epochs": int(epochs_per_client[rank])})
+            cmd_queues[rank].put({
+                "cmd": "train_round",
+                "epochs": int(epochs_per_client[rank]),
+                "collect_state": bool(use_server),
+            })
 
-        # Gather critics + metrics from clients
+        # Gather metrics from clients
         raw_msgs: List[Dict[str, Any]] = []
         for rank in range(n_clients):
             msg = rep_queues[rank].get()
@@ -255,33 +278,38 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
                 raise RuntimeError(f"client {rank} failed: {msg['error']}")
             raw_msgs.append(msg)
 
-        # Build hazard_metrics aligned with client messages
-        hazard_metrics: List[Optional[float]] = []
-        for msg in raw_msgs:
-            m = msg.get("metrics", {}) or {}
-            hazard_metrics.append(float(m.get("hazard_rate", 0.0)))
+        if use_server and server is not None:
+            # Build hazard_metrics aligned with client messages
+            hazard_metrics: List[Optional[float]] = []
+            for msg in raw_msgs:
+                m = msg.get("metrics", {}) or {}
+                hazard_metrics.append(float(m.get("hazard_rate", 0.0)))
 
-        # Package critic states (weights here are dummies; server will ignore when hazard_metrics is provided)
-        crit_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]] = []
-        for msg in raw_msgs:
-            crit_states.append((msg.get("critic_state", None), 1.0))
+            # Package critic states (weights here are dummies; server will ignore when hazard_metrics is provided)
+            crit_states: List[Tuple[Optional[Dict[str, torch.Tensor]], float]] = []
+            for msg in raw_msgs:
+                crit_states.append((msg.get("critic_state", None), 1.0))
 
-        # Aggregate with hazard-weighted prior (critic only)
-        server.aggregate_and_refit(
-            critic_states=crit_states,
-            #hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
-        )
+            # Aggregate with hazard-weighted prior (critic only)
+            server.aggregate_and_refit(
+                critic_states=crit_states,
+                #hazard_metrics=hazard_metrics,  # enables hazard-weighted aggregation on server
+            )
 
-        # Broadcast the averaged critic back out (as prior only)
-        pkg = server.package_broadcast()
-        for cq in cmd_queues:
-            cq.put({"cmd": "broadcast", "payload": pkg})
+            # Broadcast the averaged critic back out (as prior only)
+            pkg = server.package_broadcast()
+            for cq in cmd_queues:
+                cq.put({"cmd": "broadcast", "payload": pkg})
 
-        # Optional checkpoint cadence
-        if (r + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", R))) == 0:
-            save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
-            os.makedirs(save_dir, exist_ok=True)
-            server.save_checkpoint(save_dir, tag=f"round{r+1}")
+            # Optional checkpoint cadence
+            if (r + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", R))) == 0:
+                save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
+                os.makedirs(save_dir, exist_ok=True)
+                server.save_checkpoint(save_dir, tag=f"round{r+1}")
+        else:
+            # Local-only mode: refresh each client's prior from its own round data
+            for cq in cmd_queues:
+                cq.put({"cmd": "refresh_prior"})
 
     # Shutdown clients
     for cq in cmd_queues:
@@ -290,9 +318,11 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         p.join()
 
     # Final save on server
-    save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
-    os.makedirs(save_dir, exist_ok=True)
-    crit_path = server.save_checkpoint(save_dir, tag="final")
-    server.finish()
+    if use_server and server is not None:
+        save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
+        os.makedirs(save_dir, exist_ok=True)
+        crit_path = server.save_checkpoint(save_dir, tag="final")
+        server.finish()
+        return (crit_path or "", "")
 
-    return (crit_path or "", "")
+    return ("", "")
