@@ -214,18 +214,47 @@ def _client_loop(
                 _load_critic_from_pkg(msg.get("payload", {}))
             elif cmd == "train_round":
                 epochs = int(msg.get("epochs", 1))
-
-                # reset per-round distributional prior buffer (no-op if disabled)
-                if hasattr(trainer, "reset_dist_prior_buffer"):
-                    trainer.reset_dist_prior_buffer()
-
-                # run local PPO for the allocated epochs
                 for _ in range(max(1, epochs)):
                     trainer.train_for_epochs(n_epochs=1)
                     if trainer.total_env_steps >= cfg.total_steps:
                         break
 
-                # reply with local critic state (to be averaged on server)
+                # Build per-round distributional prior (barycenter) if enabled
+                prior_quantiles = None
+                if getattr(trainer, "enable_dist_prior_buffer", False):
+                    try:
+                        q_prior = trainer.build_round_distributional_prior()
+                        if q_prior is not None:
+                            prior_quantiles = q_prior.detach().cpu()
+
+                            # --- NEW: log barycenter using wandb.Table + wandb.plot.histogram ---
+                            if run is not None:
+                                try:
+                                    arr = prior_quantiles.numpy().astype("float32")
+                                    data = [[float(x)] for x in arr]
+                                    table = wandb.Table(data=data, columns=["prior_q"])
+                                    hist = wandb.plot.histogram(
+                                        table,
+                                        "prior_q",
+                                        title=f"Client {rank} prior barycenter",
+                                    )
+                                    run.log(
+                                        {
+                                            "fedrl/prior_barycenter_mean": float(arr.mean()),
+                                            "fedrl/prior_barycenter_min": float(arr.min()),
+                                            "fedrl/prior_barycenter_max": float(arr.max()),
+                                            "fedrl/prior_barycenter_hist": hist,
+                                        },
+                                        step=int(trainer.total_env_steps),
+                                    )
+                                except Exception as e:
+                                    print(f"[client {rank}] failed to log barycenter: {e}")
+                            # --- end NEW ---
+
+                    except Exception as e:
+                        print(f"[client {rank}] failed to build dist prior: {e}")
+
+                # reply with local critic state + optional prior quantiles
                 crit_state = None
                 if getattr(trainer.model, "critic", None) is not None:
                     try:
@@ -235,21 +264,6 @@ def _client_loop(
                         }
                     except Exception:
                         crit_state = None
-
-                # build per-round distributional prior over critic quantiles
-                prior_quantiles = None
-                if hasattr(trainer, "build_round_distributional_prior"):
-                    try:
-                        q_prior = trainer.build_round_distributional_prior(
-                            use_cvar_weight=True,
-                            cvar_scale=float(getattr(cfg, "prior_cvar_scale", 1.0)),
-                        )
-                    except Exception as e:
-                        print(f"[client {rank}] failed to build distributional prior: {e}")
-                        q_prior = None
-
-                    if q_prior is not None:
-                        prior_quantiles = q_prior.detach().cpu()
 
                 rep_q.put({
                     "rank": rank,

@@ -106,10 +106,44 @@ class FedRLServer:
         if q_prior is None:
             self.prior_quantiles = None
             return
+
+        # Ensure tensor on device, 1D
+        if not isinstance(q_prior, torch.Tensor):
+            q_prior = torch.tensor(q_prior, dtype=torch.float32, device=self.device)
+        else:
+            q_prior = q_prior.to(self.device, dtype=torch.float32)
+
         if q_prior.dim() != 1:
-            raise ValueError(f"set_global_prior_quantiles expected 1D tensor, got shape {tuple(q_prior.shape)}")
+            raise ValueError(
+                f"global prior quantiles must be 1D, got shape {tuple(q_prior.shape)}"
+            )
+
+        # Store a cpu copy for broadcasting
         self.prior_quantiles = q_prior.detach().cpu()
 
+        # --- NEW: log global barycenter on the server using Table + histogram plot ---
+        if self.run is not None:
+            try:
+                arr = self.prior_quantiles.numpy().astype("float32")
+                data = [[float(x)] for x in arr]
+                table = wandb.Table(data=data, columns=["prior_q"])
+                hist = wandb.plot.histogram(
+                    table,
+                    "prior_q",
+                    title="Global prior barycenter",
+                )
+                wandb.log(
+                    {
+                        "server/prior_barycenter_mean": float(arr.mean()),
+                        "server/prior_barycenter_min": float(arr.min()),
+                        "server/prior_barycenter_max": float(arr.max()),
+                        "server/prior_barycenter_hist": hist,
+                    },
+                    step=self._wb_step(),
+                )
+            except Exception as e:
+                print(f"[FedRLServer] failed to log global barycenter: {e}")
+        # --- end NEW ---
 
     def _wb_step(self) -> int:
         return int(self.round_idx)
