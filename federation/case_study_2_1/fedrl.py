@@ -76,6 +76,9 @@ class FedRLServer:
         self.agg_hazard_eps = float(getattr(cfg, "agg_hazard_eps", 1e-3))
         self.agg_w_max = float(getattr(cfg, "agg_w_max", 10.0))  # set <=0 to disable capping
 
+        self.critic_state: Optional[Dict[str, torch.Tensor]] = None  # latest averaged critic state
+        self.prior_quantiles: Optional[torch.Tensor] = None          # global distributional prior vector
+
         # Optional W&B run (server)
         self.run = None
         try:
@@ -92,15 +95,39 @@ class FedRLServer:
         except Exception:
             self.run = None
 
+    @torch.no_grad()
+    def set_global_prior_quantiles(self, q_prior: Optional[torch.Tensor]) -> None:
+        """
+        Set the global distributional prior vector that will be broadcast to all clients.
+
+        Args:
+          q_prior: tensor [Nq] on any device, or None to clear.
+        """
+        if q_prior is None:
+            self.prior_quantiles = None
+            return
+        if q_prior.dim() != 1:
+            raise ValueError(f"set_global_prior_quantiles expected 1D tensor, got shape {tuple(q_prior.shape)}")
+        self.prior_quantiles = q_prior.detach().cpu()
+
+
     def _wb_step(self) -> int:
         return int(self.round_idx)
 
     def package_broadcast(self) -> Dict[str, Any]:
         """
-        What clients receive. Only the critic state is sent (or None).
+        What clients receive.
+
+        For the new method, the important field is 'prior_quantiles', which is
+        a global distributional prior vector. 'critic' is kept for backward
+        compatibility and can be ignored by clients if they use the vector prior.
         """
-        crit_sd = None if self.critic_state is None else {k: v.detach().cpu() for k, v in self.critic_state.items()}
-        return {"critic": crit_sd}
+        crit_sd = None if self.critic_state is None else {
+            k: v.detach().cpu() for k, v in self.critic_state.items()
+        }
+        prior_q = None if self.prior_quantiles is None else self.prior_quantiles.detach().cpu()
+        return {"critic": crit_sd, "prior_quantiles": prior_q}
+
 
     def _compute_hazard_weights(self, hazards: List[Optional[float]]) -> List[float]:
         """

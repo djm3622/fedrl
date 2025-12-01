@@ -327,6 +327,35 @@ class DistValueCritic(_CriticBase):
         for p in self.head_prior.parameters():
             p.requires_grad_(False)
 
+        self.register_buffer("prior_q_global", torch.zeros(n_quantiles))
+        self._use_global_prior_q = False
+
+    @torch.no_grad()
+    def set_global_prior_quantiles(self, q_prior: torch.Tensor) -> None:
+        """
+        Set a global distributional prior over returns as a fixed quantile vector.
+
+        Args:
+          q_prior: tensor [Nq] in the same value units as the critic output
+                   (after squashing). This is typically an average of client
+                   barycenter vectors across all clients.
+        """
+        if q_prior is None:
+            self._use_global_prior_q = False
+            return
+
+        if q_prior.dim() != 1:
+            raise ValueError(f"set_global_prior_quantiles expected 1D tensor, got shape {tuple(q_prior.shape)}")
+        if int(q_prior.numel()) != int(self.n_quantiles):
+            raise ValueError(
+                f"set_global_prior_quantiles expected numel {self.n_quantiles}, got {int(q_prior.numel())}"
+            )
+
+        q_t = q_prior.to(self.prior_q_global.device, dtype=self.prior_q_global.dtype)
+        self.prior_q_global.copy_(q_t)
+        self._use_global_prior_q = True
+
+
     @torch.no_grad()
     def update_prior_from_state_dict(self, prior_sd: dict) -> None:
         """
@@ -367,10 +396,15 @@ class DistValueCritic(_CriticBase):
         if not cfg.enabled:
             return q_loc
 
-        # Prior path (full trunk or head-only)
-        z_pri = self._encode_prior(global_planes, head_only_features=z_loc)
-        with torch.no_grad():
-            q_pri = self._squash(self.head_prior(z_pri))   # [B, N]
+        # Prior path
+        if getattr(self, "_use_global_prior_q", False):
+            # State-independent global prior distribution (same for all states)
+            q_pri = self.prior_q_global.unsqueeze(0).expand_as(q_loc)  # [B, N]
+        else:
+            # Full trunk or head-only prior from a frozen critic
+            z_pri = self._encode_prior(global_planes, head_only_features=z_loc)
+            with torch.no_grad():
+                q_pri = self._squash(self.head_prior(z_pri))   # [B, N]
 
         # Affine shrinkage per quantile
         q_shrunk = q_pri + cfg.alpha * (q_loc - q_pri)
@@ -438,3 +472,8 @@ class MAPPOModel:
                 radius_rel=float(radius_rel),
                 use_full_trunk=bool(use_full_trunk),
             ))
+    
+    @torch.no_grad()
+    def set_global_prior_quantiles(self, q_prior: torch.Tensor):
+        if hasattr(self.critic, "set_global_prior_quantiles"):
+            self.critic.set_global_prior_quantiles(q_prior)

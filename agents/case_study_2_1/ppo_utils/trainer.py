@@ -20,7 +20,7 @@ trainer.py — Unified PPOTrainer for local, FedAvg/FedTrunc, and FedRL-prior mo
       empirically separates FedAvg from FedRL when hazards are stochastic (slip).
 """
 
-from typing import Dict, Any, Union, List
+from typing import Dict, Any, Union, List, Optional
 import numpy as np
 import torch
 import wandb
@@ -31,6 +31,7 @@ from .helpers import (
     compute_gae, to_tchw, ego_list_to_tchw, quantile_huber_loss,
     setup_optimizers, centralized_value_mean, ppo_epoch_update
 )
+from federation.case_study_2_1.barycenter import RoundDistBuffer, RoundDistBufferCfg
 from .buffer import RolloutBuffer
 from eval.distributions import log_distributional_visuals_wandb
 from eval.metric_losses import run_eval_rollout
@@ -112,6 +113,14 @@ class PPOTrainer:
         self.next_eval = getattr(cfg, "eval_every_steps", 0)
 
         self.is_dist = hasattr(self.model.critic, "taus")
+
+        # per-round distributional prior buffer (fedrl only; gated by cfg)
+        self.enable_dist_prior_buffer = bool(getattr(self.cfg, "enable_dist_prior_buffer", False)) and self.is_dist
+        self._dist_prior_buffer: Optional[RoundDistBuffer] = None
+        if self.enable_dist_prior_buffer:
+            alpha_tail = float(getattr(self.cfg, "prior_alpha_tail", getattr(self.cfg, "cvar_alpha", 0.10)))
+            self._dist_prior_buffer = RoundDistBuffer(RoundDistBufferCfg(alpha_tail=alpha_tail))
+
 
         # ---------- AE auxiliary (optional) ----------
         self.ae_enabled = bool(getattr(cfg, "enable_ae_aux", False)) and _HAS_AE
@@ -283,6 +292,49 @@ class PPOTrainer:
             self._round_episodes = 0
             self._round_catastrophes = 0
         return out
+    
+    # ---------- distributional prior buffer api (one client, one round) ----------
+    def reset_dist_prior_buffer(self) -> None:
+        """
+        Reset the per-round distributional buffer.
+
+        Call this at the start of a communication round when using FedRL
+        with distributional priors. No-op if the buffer is disabled.
+        """
+        if self._dist_prior_buffer is not None:
+            self._dist_prior_buffer.reset()
+
+    def accumulate_dist_prior_batch(self, z_batch: torch.Tensor, alpha_tail: Optional[float] = None) -> None:
+        """
+        Add a batch of critic quantile outputs to the per-round buffer.
+
+        Args:
+          z_batch: tensor [B, Nq] with critic quantiles for visited states.
+          alpha_tail: optional override for tail fraction used in cvar.
+        """
+        if self._dist_prior_buffer is None:
+            return
+        self._dist_prior_buffer.add_batch(z_batch, alpha_tail=alpha_tail)
+
+    def build_round_distributional_prior(
+        self,
+        use_cvar_weight: bool = True,
+        cvar_scale: float = 1.0,
+    ) -> Optional[torch.Tensor]:
+        """
+        Build the per-client, per-round barycentric prior over critic quantiles.
+
+        Returns:
+          q_prior: tensor [Nq] on cpu, or None if no data was accumulated
+                   or the buffer is disabled.
+        """
+        if self._dist_prior_buffer is None:
+            return None
+        return self._dist_prior_buffer.build_prior(
+            use_cvar_weight=use_cvar_weight,
+            cvar_scale=float(cvar_scale),
+        )
+
 
     # --- absolute W&B step helper (monotonic across resumes) ---
     def _wb_step(self) -> int:
@@ -575,6 +627,15 @@ class PPOTrainer:
         glob_batch = self.roll.glob[:T]
         values_old = self.roll.values[:T].detach()
 
+        # per-round distributional prior accumulation (fedrl only)
+        z_all: Optional[torch.Tensor] = None
+        if self.enable_dist_prior_buffer and self.is_dist and T > 0:
+            with torch.no_grad():
+                z_all = self.model.critic(glob_batch.to(self.device))  # [T, Nq]
+            # use the same tail level as cvar_alpha by default
+            self.accumulate_dist_prior_batch(z_all, alpha_tail=alpha)
+
+
         # ---------- 4) Baseline PPO update (reward-only) ----------
         metrics = ppo_epoch_update(
             cfg=self.cfg,
@@ -621,12 +682,16 @@ class PPOTrainer:
         if self.ae_enabled and wandb.run is not None:
             metrics[f"client{self.client_id}/ae/rec_mse"] = float(rec_loss)
 
-        # ---------- 8) Quick distributional debug (unchanged) ----------
+        # ---------- 8) Quick distributional debug ----------
         if self.is_dist:
             with torch.no_grad():
-                z_dbg = self.model.critic(glob_batch[: min(64, T)].to(self.device))
+                if z_all is not None:
+                    z_dbg = z_all[: min(64, z_all.size(0))].to(self.device)
+                else:
+                    z_dbg = self.model.critic(glob_batch[: min(64, T)].to(self.device))
                 v_mean_dbg = z_dbg.mean(dim=-1).mean().item()
             metrics[f"client{self.client_id}/critic/v_mean_mb"] = v_mean_dbg
+
 
         metrics.update({
             f"client{self.client_id}/optim/lr_actor": self.opt_actor.param_groups[0]["lr"],
