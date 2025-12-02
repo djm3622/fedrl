@@ -221,6 +221,10 @@ def _client_loop(
                 _load_critic_from_pkg(msg.get("payload", {}))
             elif cmd == "train_round":
                 epochs = int(msg.get("epochs", 1))
+
+                # reset buffer at the start of the round
+                trainer.reset_dist_prior_buffer()
+
                 for _ in range(max(1, epochs)):
                     trainer.train_for_epochs(n_epochs=1)
                     if trainer.total_env_steps >= cfg.total_steps:
