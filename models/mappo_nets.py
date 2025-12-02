@@ -36,7 +36,7 @@ class PriorRegCfg:
     alpha: float = 0.5           # shrink: y_pri + alpha * (y_loc - y_pri)
     beta: float = 1.0            # exponent in delta^beta
     radius_abs: float = 0.0      # absolute tube radius; if >0 overrides relative
-    radius_rel: float = 0.10     # relative tube radius fraction
+    radius_rel: float = 1.0     # relative tube radius fraction
     use_full_trunk: bool = True  # if True, prior path uses full averaged trunk; else head-only
 
 

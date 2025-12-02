@@ -174,29 +174,31 @@ def _client_loop(
 
             try:
                 if prior_q is not None and is_dist_critic and hasattr(trainer.model, "set_global_prior_quantiles"):
+                    print(f"[client {rank}] setting critic prior from quantile vector")
                     # Set global vector prior on distributional critic
                     trainer.model.set_global_prior_quantiles(prior_q)
 
                     # Enable forward-time prior regularization
                     if hasattr(trainer.model, "set_prior_regularization"):
                         trainer.model.set_prior_regularization(
-                            enabled=getattr(trainer.cfg, "prior_enabled", True),
-                            alpha=float(getattr(trainer.cfg, "prior_alpha", 0.5)),
-                            beta=float(getattr(trainer.cfg, "prior_beta", 1.0)),
-                            radius_abs=float(getattr(trainer.cfg, "prior_radius_abs", 0.0)),
-                            radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
+                            enabled=getattr(trainer.cfg, "enabled", True),
+                            alpha=float(getattr(trainer.cfg, "alpha", 0.5)),
+                            beta=float(getattr(trainer.cfg, "beta", 1.0)),
+                            radius_abs=float(getattr(trainer.cfg, "radius_abs", 0.0)),
+                            radius_rel=float(getattr(trainer.cfg, "radius_rel", 1.0)),
                         )
                 elif crit_sd is not None and getattr(trainer.model, "critic", None) is not None:
                     # Fallback: old behavior using a full critic prior
+                    print(f"[client {rank}] setting critic prior from full state dict")
                     if hasattr(trainer.model, "update_critic_prior"):
                         trainer.model.update_critic_prior(crit_sd)
                     if hasattr(trainer.model, "set_prior_regularization"):
                         trainer.model.set_prior_regularization(
-                            enabled=getattr(trainer.cfg, "prior_enabled", True),
-                            alpha=float(getattr(trainer.cfg, "prior_alpha", 0.5)),
-                            beta=float(getattr(trainer.cfg, "prior_beta", 1.0)),
-                            radius_abs=float(getattr(trainer.cfg, "prior_radius_abs", 0.0)),
-                            radius_rel=float(getattr(trainer.cfg, "prior_radius_rel", 0.10)),
+                            enabled=getattr(trainer.cfg, "enabled", True),
+                            alpha=float(getattr(trainer.cfg, "alpha", 0.5)),
+                            beta=float(getattr(trainer.cfg, "beta", 1.0)),
+                            radius_abs=float(getattr(trainer.cfg, "radius_abs", 0.0)),
+                            radius_rel=float(getattr(trainer.cfg, "radius_rel", 1.0)),
                         )
 
                 trainer.model.critic.to(trainer.device)
