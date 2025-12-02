@@ -121,29 +121,35 @@ class FedRLServer:
         # Store a cpu copy for broadcasting
         self.prior_quantiles = q_prior.detach().cpu()
 
-        # --- NEW: log global barycenter on the server using Table + histogram plot ---
+        # --- NEW: log global barycenter on the server using a line plot ---
         if self.run is not None:
             try:
                 arr = self.prior_quantiles.numpy().astype("float32")
-                data = [[float(x)] for x in arr]
-                table = wandb.Table(data=data, columns=["prior_q"])
-                hist = wandb.plot.histogram(
-                    table,
-                    "prior_q",
-                    title="Global prior barycenter",
+                n_q = arr.shape[0]
+                xs = list(range(n_q))
+                ys = arr.tolist()
+
+                line = wandb.plot.line_series(
+                    xs=[xs],
+                    ys=[ys],
+                    keys=["global_prior"],
+                    title="Global prior barycenter (quantiles)",
+                    xname="quantile_index",
                 )
+
                 wandb.log(
                     {
                         "server/prior_barycenter_mean": float(arr.mean()),
                         "server/prior_barycenter_min": float(arr.min()),
                         "server/prior_barycenter_max": float(arr.max()),
-                        "server/prior_barycenter_hist": hist,
+                        "server/prior_barycenter_line": line,
                     },
                     step=self._wb_step(),
                 )
             except Exception as e:
                 print(f"[FedRLServer] failed to log global barycenter: {e}")
         # --- end NEW ---
+
 
     def _wb_step(self) -> int:
         return int(self.round_idx)

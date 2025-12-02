@@ -233,22 +233,29 @@ def _client_loop(
                             if run is not None:
                                 try:
                                     arr = prior_quantiles.numpy().astype("float32")
-                                    data = [[float(x)] for x in arr]
-                                    table = wandb.Table(data=data, columns=["prior_q"])
-                                    hist = wandb.plot.histogram(
-                                        table,
-                                        "prior_q",
-                                        title=f"Client {rank} prior barycenter",
+
+                                    # x-axis: quantile index; y-axis: quantile value
+                                    xs = list(range(len(arr)))
+                                    ys = arr.tolist()
+
+                                    line = wandb.plot.line_series(
+                                        xs=[xs],
+                                        ys=[ys],
+                                        keys=[f"client{rank}"],
+                                        title=f"Client {rank} prior barycenter (quantiles)",
+                                        xname="quantile_index",
                                     )
+
                                     run.log(
                                         {
                                             "fedrl/prior_barycenter_mean": float(arr.mean()),
                                             "fedrl/prior_barycenter_min": float(arr.min()),
                                             "fedrl/prior_barycenter_max": float(arr.max()),
-                                            "fedrl/prior_barycenter_hist": hist,
+                                            "fedrl/prior_barycenter_line": line,
                                         },
                                         step=int(trainer.total_env_steps),
                                     )
+
                                 except Exception as e:
                                     print(f"[client {rank}] failed to log barycenter: {e}")
                             # --- end NEW ---
