@@ -182,7 +182,7 @@ def _client_loop(
                     if hasattr(trainer.model, "set_prior_regularization"):
                         trainer.model.set_prior_regularization(
                             enabled=getattr(trainer.cfg, "enabled", True),
-                            alpha=float(getattr(trainer.cfg, "alpha", 0.5)),
+                            alpha=float(getattr(trainer.cfg, "alpha", 0.9)),
                             beta=float(getattr(trainer.cfg, "beta", 1.0)),
                             radius_abs=float(getattr(trainer.cfg, "radius_abs", 0.0)),
                             radius_rel=float(getattr(trainer.cfg, "radius_rel", 1.0)),
@@ -195,7 +195,7 @@ def _client_loop(
                     if hasattr(trainer.model, "set_prior_regularization"):
                         trainer.model.set_prior_regularization(
                             enabled=getattr(trainer.cfg, "enabled", True),
-                            alpha=float(getattr(trainer.cfg, "alpha", 0.5)),
+                            alpha=float(getattr(trainer.cfg, "alpha", 0.9)),
                             beta=float(getattr(trainer.cfg, "beta", 1.0)),
                             radius_abs=float(getattr(trainer.cfg, "radius_abs", 0.0)),
                             radius_rel=float(getattr(trainer.cfg, "radius_rel", 1.0)),

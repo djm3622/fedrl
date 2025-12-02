@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_bary_v03"
+  wandb_run_name: "case_study_1_2_distributional_bary_v04"
   wandb_mode: "online"
   log_video: false
 
@@ -98,7 +98,7 @@ fedrl:
   fedrl_latent_hw: 5
 
   enabled: true
-  alpha: 0.5
+  alpha: 0.9
   beta: 1.0
   radius_abs: 0
   radius_rel: 1.0
