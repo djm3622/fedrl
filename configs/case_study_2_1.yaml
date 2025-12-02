@@ -1,5 +1,5 @@
 train:
-  device: "mps"
+  device: "cuda"
   total_steps: 10000000
   rollout_len: 1024
   update_epochs: 4
@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_bary_vtest_01_fedavg"
+  wandb_run_name: "case_study_1_2_distributional_bary_het_v01"
   wandb_mode: "online"
   log_video: false
 
