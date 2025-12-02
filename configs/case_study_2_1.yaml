@@ -1,5 +1,5 @@
 train:
-  device: "cuda"
+  device: "mps"
   total_steps: 10000000
   rollout_len: 1024
   update_epochs: 4
@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_bary_v04"
+  wandb_run_name: "case_study_1_2_distributional_bary_vtest_01_fedavg"
   wandb_mode: "online"
   log_video: false
 
@@ -40,7 +40,7 @@ train:
   num_communication_rounds: 90
   local_epochs_per_round: 40
   n_clients: 6
-  client_weights: [0.20, 0.19, 0.17, 0.16, 0.15, 0.13]
+  client_weights: [0.17, 0.17, 0.17, 0.17, 0.16, 0.16]
 
 env:
   H: 10
@@ -49,12 +49,13 @@ env:
   starts: [[9, 0], [0, 0], [9, 9]]
   goals: [[0, 5]]
 
-  obstacle_template_id: "warehouse_a"
+  obstacle_template_id: "WarehouseA"
   obstacles: []
 
   # 3x2 hazard centered: rows 4..6, cols 4..5 (inclusive)
-  hazard_zone_bounds: [3, 4, 5, 5]
+  hazard_zone_bounds: null
   hazard_zone_cells: null
+  hazard_template_id: "WarehouseA"
 
   hazard_prob: 0.40
   hazard_loss: 120.0

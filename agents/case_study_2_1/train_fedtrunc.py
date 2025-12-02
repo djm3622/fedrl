@@ -122,6 +122,11 @@ def _client_loop(
         time.sleep(0.05 * rank)
 
         cfg = copy.deepcopy(base_cfg)
+
+        # Per client environment selection (WarehouseA..F via config helper)
+        if hasattr(cfg, "make_client_cfg"):
+            cfg = cfg.make_client_cfg(rank)
+
         # per-client seed + ids
         cfg.seed = int(getattr(base_cfg, "seed", 0)) + int(rank)
         cfg.client_id = rank

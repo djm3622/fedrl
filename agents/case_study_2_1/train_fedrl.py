@@ -120,12 +120,17 @@ def _client_loop(
         time.sleep(0.05 * rank)
 
         cfg = copy.deepcopy(base_cfg)
+
+        # Per client environment selection (WarehouseA..F via config helper)
+        if hasattr(cfg, "make_client_cfg"):
+            cfg = cfg.make_client_cfg(rank)
+
         cfg.seed = int(base_cfg.seed) + int(rank)
         cfg.client_id = rank
         cfg.device = gpu_device
         cfg.n_clients = n_clients
 
-        # per-client deterministic variations
+        # per client deterministic variations
         hazard_delta = float(os.getenv("HAZARD_DELTA", "0.05"))
         slip_delta = float(os.getenv("SLIP_DELTA", "0.02"))
         cfg.hazard_prob = _spread_value(base_cfg.hazard_prob, hazard_delta, rank, n_clients)
@@ -162,9 +167,9 @@ def _client_loop(
 
             New behavior:
               - If a global prior quantile vector is provided and the critic is
-                distributional, use it as a state-independent distributional prior.
+                distributional, use it as a state independent distributional prior.
               - Enable prior regularization in the forward pass.
-              - Optionally fall back to the old FedAvg-style prior if no vector
+              - Optionally fall back to the old FedAvg style prior if no vector
                 is provided or the critic is not distributional.
             """
             prior_q = pkg.get("prior_quantiles", None)
@@ -178,7 +183,7 @@ def _client_loop(
                     # Set global vector prior on distributional critic
                     trainer.model.set_global_prior_quantiles(prior_q)
 
-                    # Enable forward-time prior regularization
+                    # Enable forward time prior regularization
                     if hasattr(trainer.model, "set_prior_regularization"):
                         trainer.model.set_prior_regularization(
                             enabled=getattr(trainer.cfg, "enabled", True),
@@ -221,7 +226,7 @@ def _client_loop(
                     if trainer.total_env_steps >= cfg.total_steps:
                         break
 
-                # Build per-round distributional prior (barycenter) if enabled
+                # Build per round distributional prior (barycenter) if enabled
                 prior_quantiles = None
                 if getattr(trainer, "enable_dist_prior_buffer", False):
                     try:
@@ -229,12 +234,11 @@ def _client_loop(
                         if q_prior is not None:
                             prior_quantiles = q_prior.detach().cpu()
 
-                            # --- NEW: log barycenter using wandb.Table + wandb.plot.histogram ---
+                            # log barycenter using wandb.plot.line_series
                             if run is not None:
                                 try:
                                     arr = prior_quantiles.numpy().astype("float32")
 
-                                    # x-axis: quantile index; y-axis: quantile value
                                     xs = list(range(len(arr)))
                                     ys = arr.tolist()
 
@@ -258,7 +262,6 @@ def _client_loop(
 
                                 except Exception as e:
                                     print(f"[client {rank}] failed to log barycenter: {e}")
-                            # --- end NEW ---
 
                     except Exception as e:
                         print(f"[client {rank}] failed to build dist prior: {e}")
@@ -297,7 +300,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
 
     For now, the server still aggregates critic states via FedAvg (or a
     hazard-weighted variant if enabled in FedRLServer). Clients also send
-    per-round distributional priors (prior_quantiles), which can be used
+    per round distributional priors (prior_quantiles), which can be used
     to replace or augment the FedAvg logic in a subsequent step.
 
     Returns:
@@ -311,7 +314,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
     # Server
     server = FedRLServer(cfg, device=device)
 
-    # Normalize weights and allocate per-client epochs
+    # Normalize weights and allocate per client epochs
     w = normalize_weights(cfg.client_weights, cfg.n_clients)
     epochs_per_client = _compute_epochs_per_client(cfg.local_epochs_per_round, cfg.n_clients, w)
 
@@ -359,7 +362,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
             m = msg.get("metrics", {}) or {}
             hazard_metrics.append(float(m.get("hazard_rate", 0.0)))
 
-        # Collect per-client distributional priors
+        # Collect per client distributional priors
         client_priors: List[torch.Tensor] = []
         for msg in raw_msgs:
             q_i = msg.get("prior_quantiles", None)
@@ -376,9 +379,6 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
 
         # Set the global distributional prior on the server
         server.set_global_prior_quantiles(q_global)
-
-        # Note: we do not need FedAvg over critic states for this method.
-        # critic_states and aggregate_and_refit are not used here.
 
         # Broadcast the averaged critic back out (as prior only)
         pkg = server.package_broadcast()
