@@ -393,7 +393,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
         if (r + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", R))) == 0:
             save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
             os.makedirs(save_dir, exist_ok=True)
-            server.save_checkpoint(save_dir, tag=f"round{r+1}")
+            server.save_checkpoint(save_dir, tag=f"round{r+1}_fedrl_seed{cfg.seed}")
 
     # Shutdown clients
     for cq in cmd_queues:
@@ -404,7 +404,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
     # Final save on server
     save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
     os.makedirs(save_dir, exist_ok=True)
-    crit_path = server.save_checkpoint(save_dir, tag="final")
+    crit_path = server.save_checkpoint(save_dir, tag=f"final_fedrl_seed{cfg.seed}")
     server.finish()
 
     return (crit_path or "", "")

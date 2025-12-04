@@ -8,6 +8,7 @@ test.ipynb
 batch_train.sh
 batch_p_train.sh
 external_eval.py
+run_comparor.py
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

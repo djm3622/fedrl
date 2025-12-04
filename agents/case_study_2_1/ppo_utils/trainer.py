@@ -508,8 +508,9 @@ class PPOTrainer:
         T = self.roll.ptr
         n_agents = self.roll.ego.shape[1]
 
-        lambda_cvar = float(getattr(cfg, "lambda_cvar", 0.0))
-        tau_cvar = float(getattr(cfg, "tau_cvar", 1.0))
+        lambda_cvar = cfg.lambda_cvar
+        tau_cvar = cfg.tau_cvar
+        
         if lambda_cvar <= 0.0:
             return {}
 
@@ -603,8 +604,8 @@ class PPOTrainer:
         adv_mean = (adv_mean - adv_mean.mean()) / (adv_mean.std(unbiased=False) + 1e-8)
 
         # ---------- 2) Optional CVaR advantage (separate path; no mixing with PPO adv) ----------
-        use_risk = bool(getattr(self.cfg, "risk_enable", False)) and self.is_dist
-        beta = float(getattr(self.cfg, "risk_beta", 0.0))     # used only as a gate here
+        use_risk = bool(getattr(self.cfg, "risk_enable", True))
+        beta = float(getattr(self.cfg, "risk_beta", 0.1))     # used only as a gate here
         alpha = float(getattr(self.cfg, "cvar_alpha", 0.10))
         adv_cvar = None
         v_cvar_mb = None

@@ -57,10 +57,13 @@ def main():
         choices=["local", "fedavg", "fedtrunc", "fedrl"],
         help="Training method."
     )
+    parser.add_argument("--seed", type=int, help="Seed for this run.", default=None)
     args = parser.parse_args()
 
     cfg = load_config(args.config, config_type="case_2")
     cfg.validate()
+    cfg.seed = args.seed if args.seed is not None else cfg.seed
+    cfg.wandb_run_name += f"_seed{cfg.seed}"
 
     save_path = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
     os.makedirs(save_path, exist_ok=True)

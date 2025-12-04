@@ -80,7 +80,7 @@ class GlobalEncoder(nn.Module):
     """
     Convolutional trunk for critic.
     """
-    def __init__(self, in_ch: int = 6, feat_dim: int = 256):
+    def __init__(self, in_ch: int = 6, feat_dim: int = 128):
         super().__init__()
         self.conv = nn.Sequential(
             nn.Conv2d(in_ch, 32, kernel_size=5, stride=2, padding=2), nn.ReLU(inplace=True),
@@ -155,7 +155,7 @@ class _CriticBase(nn.Module):
         * frozen copies: prior_encoder, prior_proj, and a prior head in subclasses
         * configurable via PriorRegCfg (incl. use_full_trunk)
     """
-    def __init__(self, feat_dim: int = 256, in_ch: int = 6):
+    def __init__(self, feat_dim: int = 128, in_ch: int = 6):
         super().__init__()
         self._feat_dim = feat_dim
 
@@ -232,7 +232,7 @@ class _CriticBase(nn.Module):
 # -------------------- Central (expected) critic --------------------
 
 class CentralCritic(_CriticBase):
-    def __init__(self, in_ch: int = 6, feat_dim: int = 256):
+    def __init__(self, in_ch: int = 6, feat_dim: int = 128):
         super().__init__(feat_dim=feat_dim, in_ch=in_ch)
         self.v = nn.Linear(feat_dim, 1)
 
@@ -300,7 +300,7 @@ class CentralCritic(_CriticBase):
 # -------------------- Distributional critic --------------------
 
 class DistValueCritic(_CriticBase):
-    def __init__(self, in_ch: int = 6, feat_dim: int = 256, n_quantiles: int = 51,
+    def __init__(self, in_ch: int = 6, feat_dim: int = 128, n_quantiles: int = 101,
                  v_min: float = -1100.0, v_max: float = 1200.0, squash_temp: float = 10.0):
         super().__init__(feat_dim=feat_dim, in_ch=in_ch)
         self.n_quantiles = n_quantiles
@@ -433,16 +433,16 @@ class MAPPOModel:
     def build(
         n_actions: int = 5, ego_k: int = 5, n_agents: int = 3,
         hidden_dim: int = 128, eps_explore: float = 0.05,
-        critic_type: str = "expected", n_quantiles: int = 21
+        critic_type: str = "expected", n_quantiles: int = 101
     ) -> "MAPPOModel":
         actor = ActorPolicy(
             n_actions=n_actions, ego_k=ego_k, n_agents=n_agents,
             hidden_dim=hidden_dim, eps_explore=eps_explore
         )
         if critic_type == "expected":
-            critic = CentralCritic(in_ch=6, feat_dim=256)
+            critic = CentralCritic(in_ch=6, feat_dim=128)
         elif critic_type == "distributional":
-            critic = DistValueCritic(in_ch=6, feat_dim=256, n_quantiles=n_quantiles)
+            critic = DistValueCritic(in_ch=6, feat_dim=128, n_quantiles=n_quantiles)
         else:
             raise ValueError(f"Unknown critic_type: {critic_type}")
         return MAPPOModel(actor=actor, critic=critic)

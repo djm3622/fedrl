@@ -15,7 +15,7 @@ train:
   lr_critic: 0.0002
   critic_weight_decay: 0.0
   qr_kappa: 1.0
-  n_quantiles: 51
+  n_quantiles: 101
   mean_anchor_coef: 0.1
   exploration_eps: 0.03
 
@@ -25,22 +25,22 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_bary_het_v01"
+  wandb_run_name: "case_study_1_2_distributional_bary_het_v06"
   wandb_mode: "online"
   log_video: false
 
   param_type: "distributional"
-  risk_enable: true         # turn on risk-aware mixing
-  risk_beta: 0.1            # acts as a gate here (any >0 enables tail computation)
-  cvar_alpha: 0.10
-  lambda_cvar: 0.02     # try 0.02–0.05
-  tau_cvar: 1.5         # optional temperature, 1.0–2.0
+  risk_enable: true
+  risk_beta: 0.1        # keep as-is; just acts as a gate
+  cvar_alpha: 0.10      # keep tail at 10% for now
+  lambda_cvar: 0.30     # 5x your current value
+  tau_cvar: 1.0         # no additional down-scaling
 
   # federation
-  num_communication_rounds: 90
+  num_communication_rounds: 100
   local_epochs_per_round: 40
   n_clients: 6
-  client_weights: [0.17, 0.17, 0.17, 0.17, 0.16, 0.16]
+  client_weights: [0.23, 0.23, 0.23, 0.11, 0.10, 0.10]
 
 env:
   H: 10
@@ -102,7 +102,7 @@ fedrl:
   alpha: 0.9
   beta: 1.0
   radius_abs: 0
-  radius_rel: 1.0
+  radius_rel: 0.7
 
   agg_hazard_eps: 1.0e-3   # denominator epsilon in 1/(eps + hazard)
   agg_w_max: 30.0          # cap on any single client's weight; set 0.0 to disable

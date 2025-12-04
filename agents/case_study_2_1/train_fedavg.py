@@ -263,13 +263,13 @@ def run_fedavg(cfg: Any) -> Tuple[str, str]:
 
         server.aggregate(payloads)
         if (rnd + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", 5))) == 0 or (rnd + 1) == int(cfg.num_communication_rounds):
-            server.save_checkpoint(save_dir, tag=f"round{rnd+1}")
+            server.save_checkpoint(save_dir, tag=f"round{rnd+1}_fedavg_seed{cfg.seed}")
 
     for cq in cmd_queues:
         cq.put({"cmd": "shutdown"})
     for p in procs:
         p.join()
 
-    actor_path, critic_path = server.save_checkpoint(save_dir, tag="final")
+    actor_path, critic_path = server.save_checkpoint(save_dir, tag=f"final_fedavg_seed{cfg.seed}")
     server.finish()
     return actor_path, critic_path

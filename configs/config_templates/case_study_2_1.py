@@ -255,8 +255,8 @@ class MultiAgentGridConfig:
     radius_abs: float = 0.0
     radius_rel: float = 0.10
 
-    lambda_cvar: float = 0.02     # try 0.02–0.05
-    tau_cvar: float = 1.5         # optional temperature, 1.0–2.0
+    lambda_cvar: float = 0.5     # try 0.02–0.05
+    tau_cvar: float = 1.0         # optional temperature, 1.0–2.0
 
     agg_hazard_eps: float = 1e-3
     agg_w_max: float = 10.0
