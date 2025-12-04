@@ -390,7 +390,7 @@ def run_fedrl(cfg: Any) -> Tuple[str, str]:
             cq.put({"cmd": "broadcast", "payload": pkg})
 
         # Optional checkpoint cadence
-        if (r + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", R))) == 0:
+        if (r + 1) % max(1, int(getattr(cfg, "ckpt_every_rounds", 5))) == 0 or (r + 1) == int(cfg.num_communication_rounds):
             save_dir = os.path.join("outputs", cfg.wandb_project, cfg.wandb_run_name)
             os.makedirs(save_dir, exist_ok=True)
             server.save_checkpoint(save_dir, tag=f"round{r+1}_fedrl_seed{cfg.seed}")

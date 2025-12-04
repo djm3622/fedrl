@@ -25,7 +25,7 @@ train:
   eval_every_steps: 100000
 
   wandb_project: "mappo-gridworld"
-  wandb_run_name: "case_study_1_2_distributional_bary_het_v06"
+  wandb_run_name: "case_study_1_2_distributional_bary_het_v08"
   wandb_mode: "online"
   log_video: false
 
@@ -37,7 +37,7 @@ train:
   tau_cvar: 1.0         # no additional down-scaling
 
   # federation
-  num_communication_rounds: 100
+  num_communication_rounds: 110
   local_epochs_per_round: 40
   n_clients: 6
   client_weights: [0.23, 0.23, 0.23, 0.11, 0.10, 0.10]
