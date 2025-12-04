@@ -99,7 +99,7 @@ fedrl:
   fedrl_latent_hw: 5
 
   enabled: true
-  alpha: 0.9
+  alpha: 0.75
   beta: 1.0
   radius_abs: 0
   radius_rel: 0.7
