@@ -162,12 +162,38 @@ def _client_loop(
         model.critic.to(cfg.device)
         tr = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank)
 
+        # NEW: per-client checkpoint directory
+        client_save_dir = os.path.join(
+            "outputs",
+            base_cfg.wandb_project,
+            base_cfg.wandb_run_name,
+            f"client_{rank}_seed_{cfg.seed}",
+        )
+        os.makedirs(client_save_dir, exist_ok=True)
+
         while True:
             msg = cmd_q.get()
             if not isinstance(msg, dict) or "cmd" not in msg:
                 continue
             cmd = msg["cmd"]
             if cmd == "shutdown":
+                try:
+                    actor_path = os.path.join(
+                        client_save_dir,
+                        f"actor_client{rank}_final.pt",
+                    )
+                    critic_path = os.path.join(
+                        client_save_dir,
+                        f"critic_client{rank}_final.pt",
+                    )
+                    torch.save(tr.model.actor.state_dict(), actor_path)
+                    torch.save(tr.model.critic.state_dict(), critic_path)
+
+                    if wandb.run is not None:
+                        wandb.run.summary["checkpoint/actor_path"] = actor_path
+                        wandb.run.summary["checkpoint/critic_path"] = critic_path
+                except Exception as e:
+                    print(f"[client {rank}] checkpoint save failed: {e}")
                 break
             elif cmd == "train_round":
                 trunc_flat = msg["critic_trunc"]

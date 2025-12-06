@@ -161,6 +161,14 @@ def _client_loop(
         )
         trainer = PPOTrainer(cfg, env, model, device=cfg.device, client_id=rank, wb_step_base=0)
 
+        client_save_dir = os.path.join(
+            "outputs",
+            base_cfg.wandb_project,
+            base_cfg.wandb_run_name,
+            f"client_{rank}_seed_{cfg.seed}",
+        )
+        os.makedirs(client_save_dir, exist_ok=True)
+
         def _load_critic_from_pkg(pkg: Dict[str, Any]):
             """
             Configure the client critic from the server payload.
@@ -216,6 +224,23 @@ def _client_loop(
                 continue
             cmd = msg.get("cmd", "")
             if cmd == "shutdown":
+                try:
+                    actor_path = os.path.join(
+                        client_save_dir,
+                        f"actor_client{rank}_final.pt",
+                    )
+                    critic_path = os.path.join(
+                        client_save_dir,
+                        f"critic_client{rank}_final.pt",
+                    )
+                    torch.save(trainer.model.actor.state_dict(), actor_path)
+                    torch.save(trainer.model.critic.state_dict(), critic_path)
+
+                    if wandb.run is not None:
+                        wandb.run.summary["checkpoint/actor_path"] = actor_path
+                        wandb.run.summary["checkpoint/critic_path"] = critic_path
+                except Exception as e:
+                    print(f"[client {rank}] checkpoint save failed: {e}")
                 break
             elif cmd == "broadcast":
                 _load_critic_from_pkg(msg.get("payload", {}))
